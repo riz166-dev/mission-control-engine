@@ -2,11 +2,10 @@ name: Mission Control Autonomous Sweep
 
 on:
   schedule:
-    # 8:30 AM CT (13:30 UTC daylight / 14:30 UTC standard) Mon-Fri
+    # 8:30 AM CT (13:30 UTC) and 3:00 PM CT (20:00 UTC) Mon-Fri
     - cron: '30 13 * * 1-5'
-    # 3:00 PM CT (20:00 UTC daylight / 21:00 UTC standard) Mon-Fri
     - cron: '0 20 * * 1-5'
-  workflow_dispatch: # Allows 1-click manual test runs
+  workflow_dispatch:
 
 jobs:
   sweep-and-sync:
@@ -29,4 +28,6 @@ jobs:
           GSHEET_WEBAPP_URL: ${{ secrets.GSHEET_WEBAPP_URL }}
           GSHEET_TOKEN: ${{ secrets.GSHEET_TOKEN }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
         run: python run_sweep.py
