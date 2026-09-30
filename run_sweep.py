@@ -73,15 +73,24 @@ def clean_html_description(raw_html: str) -> str:
     """Converts raw HTML job descriptions into clean, formatted plain text."""
     if not raw_html:
         return ""
-    # 1. Unescape HTML entities (&lt; -> <, &amp; -> &, &quot; -> ", etc.)
+    # 1. Unescape HTML entities (&lt; -> <, &quot; -> ", etc.)
     text = html.unescape(raw_html)
-    # 2. Convert line break tags and headers to clean newlines
+    
+    # 2. Convert non-breaking spaces and common entity leftovers to normal characters
+    text = text.replace("&nbsp;", " ").replace("\xa0", " ")
+    text = text.replace("&bull;", "•").replace("&middot;", "·")
+    text = text.replace("&rsquo;", "'").replace("&lsquo;", "'")
+    text = text.replace("&rdquo;", '"').replace("&ldquo;", '"')
+    text = text.replace("&amp;", "&")
+    
+    # 3. Convert line breaks, headings, and paragraphs to clean newlines
     text = re.sub(r"<(br|p|div|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
-    # 3. Convert list items to clean bullet points
+    # 4. Convert list items to clean bullet points
     text = re.sub(r"<li[^>]*>", "\n• ", text, flags=re.IGNORECASE)
-    # 4. Strip any remaining HTML tags
+    # 5. Strip any remaining HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-    # 5. Clean up redundant empty lines and whitespace
+    # 6. Clean up redundant empty lines and whitespace
+    text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     return text
 
