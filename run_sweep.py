@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import json
+import html
 import hashlib
 from datetime import datetime, timezone
 import requests
@@ -66,6 +67,23 @@ def clean_url(url: str) -> str:
         return ""
     clean = re.sub(r"([?&])(utm_[^&]+|ref=[^&]+|gh_src=[^&]+|lever-source=[^&]+)", "", url)
     return clean.rstrip("?&")
+
+
+def clean_html_description(raw_html: str) -> str:
+    """Converts raw HTML job descriptions into clean, formatted plain text."""
+    if not raw_html:
+        return ""
+    # 1. Unescape HTML entities (&lt; -> <, &amp; -> &, &quot; -> ", etc.)
+    text = html.unescape(raw_html)
+    # 2. Convert line break tags and headers to clean newlines
+    text = re.sub(r"<(br|p|div|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
+    # 3. Convert list items to clean bullet points
+    text = re.sub(r"<li[^>]*>", "\n• ", text, flags=re.IGNORECASE)
+    # 4. Strip any remaining HTML tags
+    text = re.sub(r"<[^>]+>", " ", text)
+    # 5. Clean up redundant empty lines and whitespace
+    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
+    return text
 
 
 def compute_content_fingerprint(text: str) -> str:
@@ -163,13 +181,13 @@ def fetch_greenhouse(board_token: str, source_label: str, default_location: str)
                 if any(kw in title.lower() for kw in target_keywords):
                     loc = item.get("location", {}).get("name", default_location)
                     desc = item.get("content", "")
-                    clean_desc = re.sub(r"<[^>]+>", " ", desc).strip()
+                    clean_desc = clean_html_description(desc)
                     jobs.append({
                         "raw_id": f"gh_{item.get('id')}",
                         "title": title,
                         "company": board_token.capitalize(),
                         "url": clean_url(item.get("absolute_url")),
-                        "description": clean_desc[:2500],
+                        "description": clean_desc,
                         "workplace_type": "Remote" if "remote" in loc.lower() else "Hybrid",
                         "location": loc,
                         "salary": "Unlisted",
@@ -179,6 +197,33 @@ def fetch_greenhouse(board_token: str, source_label: str, default_location: str)
             print(f"[{board_token}] Greenhouse returned HTTP status {res.status_code}")
     except Exception as e:
         print(f"Greenhouse fetch error ({board_token}): {e}")
+    return jobs
+
+
+def fetch_lever(site: str, source_label: str, default_location: str) -> list:
+    url = f"https://api.lever.co/v0/postings/{site}?mode=json"
+    jobs = []
+    try:
+        res = requests.get(url, timeout=12)
+        if res.status_code == 200:
+            for item in res.json():
+                title = item.get("text", "")
+                if any(kw in title.lower() for kw in ["event", "operation", "producer", "director", "creative"]):
+                    loc = item.get("categories", {}).get("location", default_location)
+                    desc = item.get("descriptionPlain", "")
+                    jobs.append({
+                        "raw_id": f"lev_{item.get('id')}",
+                        "title": title,
+                        "company": site.capitalize(),
+                        "url": clean_url(item.get("hostedUrl")),
+                        "description": desc.strip(),
+                        "workplace_type": "Remote" if "remote" in loc.lower() else "On-site",
+                        "location": loc,
+                        "salary": "Unlisted",
+                        "source": source_label
+                    })
+    except Exception as e:
+        print(f"Lever fetch error ({site}): {e}")
     return jobs
 
 
@@ -197,6 +242,8 @@ def main():
     for feed in DISCOVERY_FEEDS:
         if feed["type"] == "greenhouse":
             raw_candidates.extend(fetch_greenhouse(feed["board_token"], feed["source_label"], feed["default_location"]))
+        elif feed["type"] == "lever":
+            raw_candidates.extend(fetch_lever(feed["site"], feed["source_label"], feed["default_location"]))
 
     print(f"Candidate filtering pool: {len(raw_candidates)} matching keyword roles found.")
 
@@ -244,7 +291,7 @@ def main():
         try:
             payload = {
                 "token": gsheet_token,
-                "jobs": curated_batch[:5] # Ingest top 5 for clean batch intake
+                "jobs": curated_batch[:5]
             }
             res = requests.post(gsheet_url, json=payload, timeout=30)
             res_data = res.json()
