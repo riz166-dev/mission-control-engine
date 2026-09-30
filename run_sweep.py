@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Mission Control Autonomous Discovery & Ingestion Engine
-Crawls broad-market job boards, regional HigherEd feeds, and direct ATS targets.
+Crawls broad-market job boards, regional HigherEd feeds, and direct ATS endpoints.
 Enforces candidate calibration gates, tags granular sources, and pushes
 authenticated JSON to Google Sheet doPost webhook + sends mobile push alerts.
 """
@@ -47,13 +47,16 @@ HARD_DISQUALIFIERS = [
     r"\bcommission only\b",
     r"\bcold call(ing)?\b",
     r"\bkubernetes\b",
-    r"\bci/cd pipelines?\b"
+    r"\bci/cd pipelines?\b",
+    r"\bb2b enterprise marketing\b",
+    r"\benterprise saas marketing\b",
+    r"\bsaas marketing\b"
 ]
 
-# 3. High-Alignment Multipliers
+# 3. High-Alignment Multipliers (Clean Word Boundaries)
 POSITIVE_MULTIPLIERS = [
     "run-of-show", "stadium", "festival", "mass gathering", "permitting",
-    "apd", "afd", "ems", "clickup", "asana", "figma", "canva", "pmp",
+    "apd", "afd", r"\bems\b", "clickup", "asana", "figma", "canva", "pmp",
     "vendor procurement", "experiential", "activation", "operations", "production"
 ]
 
@@ -64,7 +67,7 @@ DISCOVERY_FEEDS = [
     # --- Primary: Regional HigherEd (Austin Metro) ---
     {
         "type": "rss_highered",
-        "url": "https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=24&region=Austin%2C%20TX",
+        "url": "https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=24",
         "source_label": "HigherEdJobs (Austin Metro)",
         "default_location": "Austin, TX"
     },
@@ -116,21 +119,15 @@ def clean_html_description(raw_html: str) -> str:
     """Converts raw HTML descriptions into clean, formatted plain text."""
     if not raw_html:
         return ""
-    # 1. Unescape HTML entities
     text = html.unescape(raw_html)
-    # 2. Normalize spaces and special typographical entities
     text = text.replace("&nbsp;", " ").replace("\xa0", " ")
     text = text.replace("&bull;", "•").replace("&middot;", "·")
     text = text.replace("&rsquo;", "'").replace("&lsquo;", "'")
     text = text.replace("&rdquo;", '"').replace("&ldquo;", '"')
     text = text.replace("&amp;", "&")
-    # 3. Clean linebreaks and headers
     text = re.sub(r"<(br|p|div|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
-    # 4. Clean list items to bullet points
     text = re.sub(r"<li[^>]*>", "\n• ", text, flags=re.IGNORECASE)
-    # 5. Strip residual HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-    # 6. Normalize whitespace
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     return text
@@ -154,12 +151,32 @@ def parse_salary(salary_str: str) -> tuple[int, int]:
     return (min(int_nums), max(int_nums))
 
 
+def scrub_description_for_salary(text: str) -> str:
+    """Scans full description text for compensation patterns ($XX,XXX - $XXX,XXX)."""
+    if not text:
+        return "Unlisted"
+    # Matches $120,000 - $150,000 or $120k - $150k
+    pattern = r"\$([0-9]{2,3}(?:,[0-9]{3})+)(?:\s*(?:-|to)\s*\$([0-9]{2,3}(?:,[0-9]{3})+))?"
+    match = re.search(pattern, text)
+    if match:
+        if match.group(2):
+            return f"${match.group(1)} - ${match.group(2)}"
+        return f"${match.group(1)}"
+    return "Unlisted"
+
+
 def evaluate_job(title: str, description: str, workplace_type: str, location: str, salary_str: str) -> dict:
     """Evaluates candidate calibration gates, match scoring, and category routing."""
     title_lower = title.lower()
     full_text = f"{title}\n{description}\n{location}".lower()
 
-    # Gate 1: Title Exclusions (Technical / Engineering)
+    # Fallback: if salary is unlisted, scrub the description
+    if salary_str == "Unlisted":
+        scrubbed = scrub_description_for_salary(description)
+        if scrubbed != "Unlisted":
+            salary_str = scrubbed
+
+    # Gate 1: Title Exclusions
     for pattern in TITLE_EXCLUSIONS:
         if re.search(pattern, title_lower):
             return {
@@ -169,7 +186,7 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
                 "notes": [f"Filtered: Excluded technical role pattern '{pattern}'."]
             }
 
-    # Gate 2: Description Hard Disqualifiers (Sales / Drayage / Quotas)
+    # Gate 2: Description Hard Disqualifiers
     for pattern in HARD_DISQUALIFIERS:
         if re.search(pattern, full_text):
             return {
@@ -193,10 +210,15 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
     score = 75
     notes = []
 
-    multiplier_hits = [m for m in POSITIVE_MULTIPLIERS if m in full_text]
-    score += min(len(multiplier_hits) * 3, 20)
-    if multiplier_hits:
-        notes.append(f"Operational multipliers matched: {', '.join(multiplier_hits[:3])}.")
+    matched_multipliers = []
+    for m in POSITIVE_MULTIPLIERS:
+        if re.search(m, full_text):
+            clean_name = m.replace(r"\b", "")
+            matched_multipliers.append(clean_name)
+
+    score += min(len(matched_multipliers) * 3, 20)
+    if matched_multipliers:
+        notes.append(f"Operational multipliers matched: {', '.join(matched_multipliers[:3])}.")
 
     is_remote = "remote" in workplace_type.lower() or "remote" in location.lower()
     is_austin = any(marker in location.lower() for marker in ["austin", "787", "del valle", "round rock", "travis"])
@@ -224,6 +246,7 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
         "passed": True,
         "score": min(score, 98),
         "status": status,
+        "salary": salary_str,
         "notes": notes
     }
 
@@ -292,7 +315,9 @@ def fetch_highered_rss(feed_url: str, source_label: str, default_location: str) 
     try:
         res = requests.get(feed_url, headers=headers, timeout=12)
         if res.status_code == 200:
-            root = ET.fromstring(res.content)
+            # Defensive clean for invalid XML entities
+            clean_xml = re.sub(r"&(?!(?:amp|lt|gt|quot|apos);)", "&amp;", res.text)
+            root = ET.fromstring(clean_xml)
             items = root.findall(".//item")
             print(f"[{source_label}] Connected. Total raw listings: {len(items)}")
             target_keywords = ["event", "operation", "producer", "production", "director", "manager", "creative", "program"]
@@ -301,7 +326,6 @@ def fetch_highered_rss(feed_url: str, source_label: str, default_location: str) 
                 link = item.findtext("link", "")
                 desc = clean_html_description(item.findtext("description", ""))
                 
-                # Extract employer if present in title "Title - Company"
                 company = "HigherEd Institution"
                 if " - " in title:
                     parts = title.split(" - ")
@@ -340,7 +364,6 @@ def fetch_jobicy_remote(feed_url: str, source_label: str) -> list:
                     url = item.get("url", "")
                     desc = clean_html_description(item.get("jobDescription", ""))
                     
-                    # Extract salary if provided in API
                     sal_min = item.get("annualSalaryMin")
                     sal_max = item.get("annualSalaryMax")
                     sal_str = f"${sal_min:,} - ${sal_max:,}" if sal_min and sal_max else "Unlisted"
@@ -412,7 +435,7 @@ def main():
             "details": {
                 "workplace_type": raw["workplace_type"],
                 "location": raw["location"],
-                "salary": raw["salary"]
+                "salary": eval_result.get("salary", raw["salary"])
             },
             "evaluation": {
                 "match_score": eval_result["score"],
@@ -429,7 +452,7 @@ def main():
         try:
             payload = {
                 "token": gsheet_token,
-                "jobs": curated_batch  # Uncapped: all passing records are delivered
+                "jobs": curated_batch
             }
             res = requests.post(gsheet_url, json=payload, timeout=40)
             res_data = res.json()
