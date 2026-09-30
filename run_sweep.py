@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Mission Control Autonomous Discovery & Ingestion Engine
-Crawls broad-market aggregators (Adzuna), regional HigherEd, and direct ATS targets.
-Enforces candidate calibration gates, contract duration filtering (>1 yr requirement),
-hourly-to-annual comp conversion, and tags granular sources.
+Crawls broad-market aggregators (Adzuna) and direct ATS targets.
+Enforces the 3-Pillar Boolean Essence Evaluation (Seniority + Domain + Operational DNA),
+contract tenure filtering (>= 12 months), hourly-to-annual compensation conversion,
+and tags granular sources.
 Pushes authenticated JSON to Google Sheet Webhook + sends mobile push alerts.
 """
 
@@ -13,7 +14,6 @@ import sys
 import json
 import html
 import hashlib
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 import requests
 
@@ -74,15 +74,9 @@ POSITIVE_MULTIPLIERS = [
 ]
 
 # ---------------------------------------------------------
-# Direct & Regional Discovery Feeds
+# Curated Direct ATS Feeds
 # ---------------------------------------------------------
 DISCOVERY_FEEDS = [
-    {
-        "type": "rss_highered",
-        "url": "https://www.higheredjobs.com/rss/categoryFeed.cfm?catID=24",
-        "source_label": "HigherEdJobs (Austin Metro)",
-        "default_location": "Austin, TX"
-    },
     {
         "type": "lever",
         "site": "twooakventures",
@@ -183,9 +177,7 @@ def scrub_description_for_salary(text: str) -> str:
 
 
 def check_contract_eligibility(full_text: str) -> tuple[bool, str]:
-    """
-    Evaluates contract roles: allows contracts >= 1 year, rejects short-term assignments.
-    """
+    """Evaluates contract roles: allows contracts >= 1 year, rejects short-term gigs."""
     for pat in SHORT_TERM_CONTRACT_PATTERNS:
         if re.search(pat, full_text):
             return False, f"Disqualified: Contract duration under 12-month minimum ({pat})."
@@ -341,30 +333,33 @@ def fetch_adzuna_jobs() -> list:
         {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
         {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
         {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
-        {"what": "Creative Operations Producer", "where": "Remote", "dist": "0"}
+        {"what": "Creative Operations Producer Remote", "where": None, "dist": None}
     ]
 
     for q in queries:
         try:
-            url = f"https://api.adzuna.com/v1/api/jobs/us/search/1"
+            url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
             params = {
                 "app_id": app_id,
                 "app_key": app_key,
                 "results_per_page": 20,
                 "what": q["what"],
-                "where": q["where"],
-                "distance": q["dist"],
                 "content-type": "application/json"
             }
+            if q["where"]:
+                params["where"] = q["where"]
+                params["distance"] = q["dist"]
+
             res = requests.get(url, params=params, timeout=12)
             if res.status_code == 200:
                 results = res.json().get("results", [])
-                print(f"[Adzuna: '{q['what']}' in {q['where']}] Harvested {len(results)} listings.")
+                target_loc = q["where"] if q["where"] else "Remote"
+                print(f"[Adzuna: '{q['what']}' in {target_loc}] Harvested {len(results)} listings.")
                 for item in results:
                     title = item.get("title", "")
                     company = item.get("company", {}).get("display_name", "Corporate Employer")
                     desc = clean_html_description(item.get("description", ""))
-                    loc_name = item.get("location", {}).get("display_name", q["where"])
+                    loc_name = item.get("location", {}).get("display_name", target_loc)
                     raw_url = item.get("redirect_url", "")
 
                     sal_min = item.get("salary_min")
@@ -375,7 +370,7 @@ def fetch_adzuna_jobs() -> list:
                     elif sal_min:
                         sal_str = f"${int(sal_min):,}+"
 
-                    is_rem = "remote" in q["where"].lower() or "remote" in loc_name.lower()
+                    is_rem = "remote" in q["what"].lower() or "remote" in loc_name.lower()
 
                     jobs.append({
                         "title": title,
@@ -388,7 +383,7 @@ def fetch_adzuna_jobs() -> list:
                         "source": f"Adzuna Aggregator ({company})"
                     })
             else:
-                print(f"[Adzuna] HTTP {res.status_code} on query '{q['what']}': {res.text}")
+                print(f"[Adzuna] HTTP {res.status_code} on query '{q['what']}': {res.text[:120]}")
         except Exception as e:
             print(f"[Adzuna] Fetch error: {e}")
 
@@ -449,41 +444,6 @@ def fetch_lever(site: str, source_label: str, default_location: str) -> list:
     return jobs
 
 
-def fetch_highered_rss(feed_url: str, source_label: str, default_location: str) -> list:
-    jobs = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    try:
-        res = requests.get(feed_url, headers=headers, timeout=12)
-        if res.status_code == 200:
-            clean_xml = re.sub(r"&(?!(?:amp|lt|gt|quot|apos);)", "&amp;", res.text)
-            root = ET.fromstring(clean_xml)
-            items = root.findall(".//item")
-            print(f"[{source_label}] Connected. Total raw listings: {len(items)}")
-            for item in items:
-                title = item.findtext("title", "")
-                link = item.findtext("link", "")
-                desc = clean_html_description(item.findtext("description", ""))
-                company = "HigherEd Institution"
-                if " - " in title:
-                    parts = title.split(" - ")
-                    title = parts[0].strip()
-                    company = parts[1].strip()
-
-                jobs.append({
-                    "title": title,
-                    "company": company,
-                    "url": clean_url(link),
-                    "description": desc,
-                    "workplace_type": "On-site",
-                    "location": default_location,
-                    "salary": "Unlisted",
-                    "source": source_label
-                })
-    except Exception as e:
-        print(f"HigherEd RSS fetch error: {e}")
-    return jobs
-
-
 def main():
     gsheet_url = os.environ.get("GSHEET_WEBAPP_URL")
     gsheet_token = os.environ.get("GSHEET_TOKEN", "mc_secure_token_78701")
@@ -499,15 +459,13 @@ def main():
     # 1. Broad Aggregator (Adzuna)
     raw_candidates.extend(fetch_adzuna_jobs())
 
-    # 2. Curated Direct ATS & RSS Feeds
+    # 2. Curated Direct ATS Feeds
     for feed in DISCOVERY_FEEDS:
         f_type = feed["type"]
         if f_type == "greenhouse":
             raw_candidates.extend(fetch_greenhouse(feed["board_token"], feed["source_label"], feed["default_location"]))
         elif f_type == "lever":
             raw_candidates.extend(fetch_lever(feed["site"], feed["source_label"], feed["default_location"]))
-        elif f_type == "rss_highered":
-            raw_candidates.extend(fetch_highered_rss(feed["url"], feed["source_label"], feed["default_location"]))
 
     print(f"Candidate filtering pool: {len(raw_candidates)} matching keyword roles found.")
 
