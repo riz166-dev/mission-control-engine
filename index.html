@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Job Search Mission Control</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --card-bg: #1e293b;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --accent: #38bdf8;
+      --fast-track: #eab308;
+      --to-apply: #10b981;
+      --parked: #0284c7;
+      --passed: #64748b;
+      --applied: #a855f7;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      margin: 0;
+      padding: 1.5rem;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    #sync-status {
+      font-size: 0.85rem;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.1);
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(56, 189, 248, 0.2);
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .btn-header {
+      background: #1e293b;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .btn-header:hover {
+      background: #334155;
+      color: var(--text-main);
+    }
+
+    #tab-container {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1.5rem;
+    }
+
+    .tab-btn {
+      background: var(--card-bg);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover {
+      border-color: var(--accent);
+    }
+    .tab-btn.active {
+      color: #0f172a;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    #job-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .job-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+    }
+
+    .job-title a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+    .job-title a:hover {
+      text-decoration: underline;
+    }
+
+    .company {
+      font-size: 1rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .score-badge {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      font-size: 0.9rem;
+      white-space: nowrap;
+    }
+
+    .meta-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .tag {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    .notes {
+      margin: 0;
+      padding-left: 1.2rem;
+      color: #cbd5e1;
+      font-size: 0.9rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .actions button {
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+    }
+
+    .btn-pass { background: #334155; color: #f8fafc; }
+    .btn-pass:hover { background: #475569; }
+
+    .btn-park { background: rgba(2, 132, 199, 0.2); color: #38bdf8; border-color: rgba(2, 132, 199, 0.4); }
+    .btn-park:hover { background: rgba(2, 132, 199, 0.4); }
+
+    .btn-to-apply { background: rgba(16, 185, 129, 0.2); color: #34d399; border-color: rgba(16, 185, 129, 0.4); }
+    .btn-to-apply:hover { background: rgba(16, 185, 129, 0.4); }
+
+    .btn-fast { background: rgba(234, 179, 8, 0.2); color: #facc15; border-color: rgba(234, 179, 8, 0.4); }
+    .btn-fast:hover { background: rgba(234, 179, 8, 0.4); }
+
+    .btn-view-desc { background: #1e293b; color: #cbd5e1; border-color: var(--border); }
+    .btn-view-desc:hover { background: #334155; }
+
+    .btn-mark-applied { background: rgba(168, 85, 247, 0.2); color: #c084fc; border-color: rgba(168, 85, 247, 0.4); }
+    .btn-mark-applied:hover { background: rgba(168, 85, 247, 0.4); }
+
+    .btn-block { background: transparent; color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); font-size: 0.75rem; }
+    .btn-block:hover { background: rgba(239, 68, 68, 0.15); }
+
+    #empty-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      background: var(--card-bg);
+      border-radius: 10px;
+      border: 1px dashed var(--border);
+    }
+
+    /* Modals */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(2px);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+      padding: 1rem;
+    }
+
+    .modal-content {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      max-width: 700px;
+      width: 100%;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+
+    .modal-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 { margin: 0; font-size: 1.15rem; }
+
+    .modal-body {
+      padding: 1.25rem;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-size: 0.95rem;
+      line-height: 1.6;
+      color: #e2e8f0;
+    }
+
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 1.5rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <h1>🎯 Mission Control</h1>
+      <div id="sync-status">Connecting to cloud feed...</div>
+    </div>
+    <div class="top-actions">
+      <button class="btn-header" onclick="openExclusionsModal()">⚙️ Exclusions</button>
+      <button class="btn-header" onclick="syncCloudFeed()">🔄 Refresh Feed</button>
+    </div>
+  </header>
+
+  <div id="tab-container"></div>
+  <div id="job-list"></div>
+
+  <div id="empty-state" style="display:none;">
+    <h2 id="empty-title">All Caught Up</h2>
+    <p id="empty-desc" style="color:var(--text-muted);">No listings in this view.</p>
+  </div>
+
+  <!-- Description Reader Modal -->
+  <div id="desc-modal" class="modal-backdrop">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-role-title">Job Description</h3>
+        <button class="modal-close" onclick="closeDescModal()">&times;</button>
+      </div>
+      <div id="modal-desc-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Exclusions Manager Modal -->
+  <div id="exclusions-modal" class="modal-backdrop">
+    <div class="modal-content" style="max-width: 500px;">
+      <div class="modal-header">
+        <h3>⚙️ Company Exclusions Manager</h3>
+        <button class="modal-close" onclick="closeExclusionsModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display:flex; gap:0.5rem; margin-bottom:1rem;">
+          <input type="text" id="new-exclusion-input" placeholder="Enter company name..." style="flex:1; padding:8px; border-radius:6px; background:#0f172a; border:1px solid var(--border); color:#fff;">
+          <button class="btn-header" onclick="addExclusionFromInput()">Block</button>
+        </div>
+        <div id="exclusions-list" style="display:flex; flex-direction:column; gap:0.5rem;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const CLOUD_FEED_URL = "https://script.google.com/macros/s/AKfycbzZ40PT19V8kfKpvbmstmL50gmYP2tpIgA_OHqoC0WVrsfyA0u6zaEpuVoceIzKiuGH/exec";
+
+    // 1. Data Store
+    window.pipelineData = [];
+    window.companyBlacklist = [];
+    window.currentTab = "Inbox";
+
+    // Load Local Cache
+    try {
+      const savedData = localStorage.getItem("job_search_pipeline");
+      if (savedData) window.pipelineData = JSON.parse(savedData);
+      const savedBlacklist = localStorage.getItem("job_search_blacklist");
+      if (savedBlacklist) window.companyBlacklist = JSON.parse(savedBlacklist);
+    } catch (e) {
+      console.error("Storage load error:", e);
+    }
+
+    function savePipeline() {
+      try {
+        localStorage.setItem("job_search_pipeline", JSON.stringify(window.pipelineData));
+      } catch (e) {
+        console.error("Save error:", e);
+      }
+    }
+
+    function saveBlacklist() {
+      try {
+        localStorage.setItem("job_search_blacklist", JSON.stringify(window.companyBlacklist));
+      } catch (e) {}
+    }
+
+    // 2. 4-Layer Deduplication Helper
+    function isDuplicateJob(newJob, existingList) {
+      if (!newJob || !Array.isArray(existingList)) return false;
+      const normalize = s => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+      return existingList.some(existing => {
+        // Layer 1: Exact ID
+        if (existing.id && newJob.id && existing.id === newJob.id) return true;
+
+        // Layer 2: Cleaned Direct Requisition URL
+        const cleanUrl = u => (u || "").split("?")[0].replace(/\/+$/, "").toLowerCase();
+        if (cleanUrl(existing.url) && cleanUrl(existing.url) === cleanUrl(newJob.url)) return true;
+
+        // Layer 3: Title + Company Match
+        const compA = normalize(existing.company);
+        const compB = normalize(newJob.company);
+        const titA = normalize(existing.title);
+        const titB = normalize(newJob.title);
+
+        if (compA && compB && compA === compB) {
+          if (titA.includes(titB) || titB.includes(titA)) return true;
+        }
+
+        // Layer 4: Structural Qualification Fingerprint (180+ chars)
+        const descA = normalize(existing.description || "");
+        const descB = normalize(newJob.description || "");
+        if (descA.length > 180 && descB.length > 180) {
+          const sample = descB.substring(0, 180);
+          if (descA.includes(sample)) return true;
+        }
+
+        return false;
+      });
+    }
+
+    // 3. Robust JSONP Cloud Sync
+    function syncCloudFeed() {
+      const statusEl = document.getElementById("sync-status");
+      statusEl.textContent = "Syncing with cloud feed...";
+
+      const callbackName = "handleFeedData";
+      window[callbackName] = function(cloudJobs) {
+        let addedCount = 0;
+
+        if (Array.isArray(cloudJobs)) {
+          cloudJobs.forEach(job => {
+            // Guard: Ignore empty or non-object rows
+            if (!job || typeof job !== "object") return;
+
+            // Safe Defaults to prevent undefined crashes
+            if (!job.pipeline_state || typeof job.pipeline_state !== "object") job.pipeline_state = {};
+            if (!job.details || typeof job.details !== "object") job.details = {};
+            if (!job.evaluation || typeof job.evaluation !== "object") job.evaluation = {};
+
+            const companyName = job.company || "Unknown Company";
+            const isBlocked = window.companyBlacklist.some(c => c.toLowerCase() === companyName.toLowerCase());
+            const alreadyExists = isDuplicateJob(job, window.pipelineData);
+
+            if (!alreadyExists && !isBlocked) {
+              if (!job.pipeline_state.status) job.pipeline_state.status = "Inbox";
+              if (!job.pipeline_state.date_fed) {
+                job.pipeline_state.date_fed = new Date().toISOString().split('T')[0];
+              }
+
+              // Repost Hard-Pass Filter
+              const datePosted = job.pipeline_state.date_posted || "";
+              const notes = Array.isArray(job.evaluation.notes) ? job.evaluation.notes : [];
+              const isRepost = /repost/i.test(datePosted) || notes.some(n => /repost/i.test(n));
+
+              if (isRepost) {
+                job.pipeline_state.status = "Passed";
+                if (!Array.isArray(job.evaluation.notes)) job.evaluation.notes = [];
+                job.evaluation.notes.unshift("Filtered: Stale candidate recycling / reposted listing.");
+              }
+
+              window.pipelineData.push(job);
+              addedCount++;
+            }
+          });
+        }
+
+        savePipeline();
+        statusEl.textContent = addedCount > 0 
+          ? `Synced live! Ingested ${addedCount} new role(s).` 
+          : "Cloud feed synced. Up to date.";
+        
+        renderCards();
+        const script = document.getElementById("cloud-jsonp-script");
+        if (script) script.remove();
+      };
+
+      // Append script tag to bypass CORS
+      const old = document.getElementById("cloud-jsonp-script");
+      if (old) old.remove();
+
+      const script = document.createElement("script");
+      script.id = "cloud-jsonp-script";
+      script.src = `${CLOUD_FEED_URL}?callback=${callbackName}&t=${Date.now()}`;
+      script.onerror = function() {
+        statusEl.textContent = "Offline mode (Loaded local cache).";
+        renderCards();
+      };
+      document.body.appendChild(script);
+    }
+
+    // 4. UI Actions & Card Management
+    function actionCard(cardId, newStatus) {
+      const job = window.pipelineData.find(j => j.id === cardId);
+      if (job) {
+        if (!job.pipeline_state) job.pipeline_state = {};
+        job.pipeline_state.status = newStatus;
+        savePipeline();
+      }
+      renderCards();
+    }
+
+    function blockCompany(comp) {
+      if (!comp || comp === "Unknown Company") return;
+      if (!window.companyBlacklist.includes(comp)) {
+        window.companyBlacklist.push(comp);
+        saveBlacklist();
+      }
+      // Pass all existing jobs from this company
+      window.pipelineData.forEach(j => {
+        if (j.company && j.company.toLowerCase() === comp.toLowerCase()) {
+          if (!j.pipeline_state) j.pipeline_state = {};
+          j.pipeline_state.status = "Passed";
+        }
+      });
+      savePipeline();
+      renderCards();
+    }
+
+    function switchTab(tabName) {
+      window.currentTab = tabName;
+      renderCards();
+    }
+
+    // 5. Card Rendering Engine
+    function renderCards() {
+      const container = document.getElementById("job-list");
+      const tabContainer = document.getElementById("tab-container");
+      container.innerHTML = "";
+
+      const tabs = ["Inbox", "★ Fast-Track", "To Apply", "✅ Applied", "Parked", "Passed"];
+      const counts = { "Inbox": 0, "★ Fast-Track": 0, "To Apply": 0, "✅ Applied": 0, "Parked": 0, "Passed": 0 };
+
+      window.pipelineData.forEach(j => {
+        const s = (j.pipeline_state && j.pipeline_state.status) ? j.pipeline_state.status : "Inbox";
+        if (s === "Fast-Track") counts["★ Fast-Track"]++;
+        else if (s === "Applied") counts["✅ Applied"]++;
+        else if (counts[s] !== undefined) counts[s]++;
+        else counts["Inbox"]++;
+      });
+
+      tabContainer.innerHTML = tabs.map(tab => {
+        const active = (window.currentTab === tab) ? "active" : "";
+        return `<button class="tab-btn ${active}" onclick="switchTab('${tab}')">${tab} (${counts[tab]})</button>`;
+      }).join("");
+
+      // Filter active cards
+      const activeJobs = window.pipelineData.filter(j => {
+        const s = (j.pipeline_state && j.pipeline_state.status) ? j.pipeline_state.status : "Inbox";
+        if (window.currentTab === "★ Fast-Track") return s === "Fast-Track";
+        if (window.currentTab === "✅ Applied") return s === "Applied";
+        return s === window.currentTab;
+      });
+
+      const emptyState = document.getElementById("empty-state");
+      if (activeJobs.length === 0) {
+        emptyState.style.display = "block";
+        document.getElementById("empty-title").textContent = window.currentTab === "Inbox" ? "🎉 Inbox Zero" : `No Jobs in ${window.currentTab}`;
+        document.getElementById("empty-desc").textContent = window.currentTab === "Inbox" ? "All newly discovered roles have been triaged." : "No listings currently staged here.";
+      } else {
+        emptyState.style.display = "none";
+        activeJobs.forEach(job => {
+          const card = document.createElement("div");
+          card.className = "job-card";
+          
+          const rawNotes = (job.evaluation && Array.isArray(job.evaluation.notes)) ? job.evaluation.notes : [];
+          const notesHtml = rawNotes.map(n => `<li>${n}</li>`).join("");
+
+          const loc = (job.details && job.details.location) ? job.details.location : "Austin, TX";
+          const workplace = (job.details && job.details.workplace_type) ? job.details.workplace_type : "Hybrid";
+          const salary = (job.details && job.details.salary) ? job.details.salary : "Unlisted";
+          const source = (job.pipeline_state && job.pipeline_state.source) ? job.pipeline_state.source : "Direct ATS";
+          const posted = (job.pipeline_state && job.pipeline_state.date_posted) ? job.pipeline_state.date_posted : "N/A";
+          const fed = (job.pipeline_state && job.pipeline_state.date_fed) ? job.pipeline_state.date_fed : "Recent";
+          const score = (job.evaluation && job.evaluation.match_score) ? job.evaluation.match_score : 85;
+
+          card.innerHTML = `
+            <div class="card-header">
+              <div>
+                <div class="job-title"><a href="${job.url || '#'}" target="_blank">${job.title || 'Untitled Role'} ↗</a></div>
+                <div class="company">${job.company || 'Unknown Company'}</div>
+              </div>
+              <div class="score-badge">${score}% Match</div>
+            </div>
+            <div class="meta-row">
+              <span class="tag">${workplace} · ${loc}</span>
+              <span class="tag">💰 ${salary}</span>
+              <span class="tag">📅 Posted: ${posted}</span>
+              <span class="tag">📥 Ingested: ${fed}</span>
+              <span class="tag">Source: ${source}</span>
+            </div>
+            ${notesHtml ? `<ul class="notes">${notesHtml}</ul>` : ''}
+            <div class="actions">
+              <button class="btn-view-desc" onclick="viewDescription('${job.id}')">📄 View Description</button>
+              <button class="btn-pass" onclick="actionCard('${job.id}', 'Passed')">Pass</button>
+              <button class="btn-park" onclick="actionCard('${job.id}', 'Parked')">Park</button>
+              <button class="btn-to-apply" onclick="actionCard('${job.id}', 'To Apply')">To Apply</button>
+              <button class="btn-fast" onclick="actionCard('${job.id}', 'Fast-Track')">★ Fast-Track</button>
+              <button class="btn-mark-applied" onclick="actionCard('${job.id}', 'Applied')">✅ Applied</button>
+              <button class="btn-block" onclick="blockCompany('${job.company || ''}')">🚫 Block Co.</button>
+            </div>
+          `;
+          container.appendChild(card);
+        });
+      }
+    }
+
+    // 6. Description Modal Logic
+    function viewDescription(id) {
+      const job = window.pipelineData.find(j => j.id === id);
+      if (!job) return;
+      document.getElementById("modal-role-title").textContent = `${job.title || 'Role'} — ${job.company || ''}`;
+      document.getElementById("modal-desc-body").textContent = job.description || "No full original description text archived for this listing.";
+      document.getElementById("desc-modal").style.display = "flex";
+    }
+
+    function closeDescModal() {
+      document.getElementById("desc-modal").style.display = "none";
+    }
+
+    // 7. Exclusions Modal Logic
+    function openExclusionsModal() {
+      renderExclusionsList();
+      document.getElementById("exclusions-modal").style.display = "flex";
+    }
+
+    function closeExclusionsModal() {
+      document.getElementById("exclusions-modal").style.display = "none";
+    }
+
+    function renderExclusionsList() {
+      const list = document.getElementById("exclusions-list");
+      if (window.companyBlacklist.length === 0) {
+        list.innerHTML = '<span style="color:var(--text-muted); font-size:0.9rem;">No companies currently blocked.</span>';
+        return;
+      }
+      list.innerHTML = window.companyBlacklist.map(c => `
+        <div style="display:flex; justify-content:space-between; align-items:center; background:#0f172a; padding:6px 12px; border-radius:6px;">
+          <span>${c}</span>
+          <button style="background:transparent; border:none; color:#ef4444; cursor:pointer;" onclick="removeExclusion('${c}')">&times;</button>
+        </div>
+      `).join("");
+    }
+
+    function addExclusionFromInput() {
+      const input = document.getElementById("new-exclusion-input");
+      const val = input.value.trim();
+      if (val) {
+        blockCompany(val);
+        input.value = "";
+        renderExclusionsList();
+      }
+    }
+
+    function removeExclusion(c) {
+      window.companyBlacklist = window.companyBlacklist.filter(item => item !== c);
+      saveBlacklist();
+      renderExclusionsList();
+    }
+
+    // Initial Execution
+    renderCards();
+    syncCloudFeed();
+
+    // Auto-poll in background every 15 minutes if left open
+    setInterval(syncCloudFeed, 15 * 60 * 1000);
+  </script>
+</body>
+</html>
