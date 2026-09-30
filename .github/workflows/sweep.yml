@@ -2,7 +2,6 @@ name: Mission Control Autonomous Sweep
 
 on:
   schedule:
-    # 8:30 AM CT (13:30 UTC) and 3:00 PM CT (20:00 UTC) Mon-Fri
     - cron: '30 13 * * 1-5'
     - cron: '0 20 * * 1-5'
   workflow_dispatch:
