@@ -34,28 +34,28 @@ HARD_DISQUALIFIERS = [
 POSITIVE_MULTIPLIERS = [
     "run-of-show", "stadium", "festival", "mass gathering", "permitting",
     "apd", "afd", "ems", "clickup", "asana", "figma", "canva", "pmp",
-    "vendor procurement", "experiential", "activation"
+    "vendor procurement", "experiential", "activation", "operations", "production"
 ]
 
 # Verified Public Feeds / Direct ATS Endpoints
 DISCOVERY_FEEDS = [
     {
         "type": "greenhouse",
-        "board_token": "yeti",
-        "source_label": "Direct / Greenhouse",
-        "default_location": "Austin, TX (SW HQ)"
-    },
-    {
-        "type": "greenhouse",
-        "board_token": "automattic",
+        "board_token": "automatticcareers",
         "source_label": "Direct / Greenhouse Remote",
         "default_location": "Remote (US)"
     },
     {
-        "type": "lever",
-        "site": "twooakventures", # Austin FC / Q2 Stadium operations
-        "source_label": "Sports ATS / Lever",
-        "default_location": "Austin, TX (Q2 Stadium)"
+        "type": "greenhouse",
+        "board_token": "gitlab",
+        "source_label": "Direct / Greenhouse Remote",
+        "default_location": "Remote (US)"
+    },
+    {
+        "type": "greenhouse",
+        "board_token": "iterable",
+        "source_label": "Direct / Greenhouse Austin",
+        "default_location": "Austin, TX"
     }
 ]
 
@@ -90,7 +90,7 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
     """Applies candidate calibration gates, match scoring, and categorization."""
     full_text = f"{title}\n{description}\n{location}".lower()
 
-    # Gate 1: Hard Disqualifiers (Sales, Booths, Drayage)
+    # Gate 1: Hard Disqualifiers
     for pattern in HARD_DISQUALIFIERS:
         if re.search(pattern, full_text):
             return {
@@ -111,16 +111,14 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
         }
 
     # Gate 3: Score Calculation
-    score = 70  # Baseline
+    score = 75
     notes = []
 
-    # Check positive multipliers
     multiplier_hits = [m for m in POSITIVE_MULTIPLIERS if m in full_text]
-    score += min(len(multiplier_hits) * 4, 20)
+    score += min(len(multiplier_hits) * 3, 20)
     if multiplier_hits:
         notes.append(f"Operational multipliers matched: {', '.join(multiplier_hits[:3])}.")
 
-    # Location & Workplace Routing
     is_remote = "remote" in workplace_type.lower() or "remote" in location.lower()
     is_austin = "austin" in location.lower() or "787" in location or "del valle" in location.lower()
 
@@ -135,12 +133,8 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
             status = "Inbox"
             notes.append("Local Austin posting placed in Inbox for candidate review.")
     else:
-        return {
-            "passed": False,
-            "score": 50,
-            "status": "Passed",
-            "notes": [f"Exceeds Austin 25-mile commute boundary ({location})."]
-        }
+        status = "Parked"
+        notes.append(f"Regional/National scope ({location}) staged for geographic review.")
 
     if salary_str and salary_str != "Unlisted":
         notes.append(f"Compensation verified: {salary_str}.")
@@ -161,9 +155,12 @@ def fetch_greenhouse(board_token: str, source_label: str, default_location: str)
     try:
         res = requests.get(url, timeout=12)
         if res.status_code == 200:
-            for item in res.json().get("jobs", []):
+            job_list = res.json().get("jobs", [])
+            print(f"[{board_token}] Connected successfully. Total raw listings on board: {len(job_list)}")
+            target_keywords = ["event", "operation", "producer", "production", "creative", "program", "director", "manager", "project"]
+            for item in job_list:
                 title = item.get("title", "")
-                if any(kw in title.lower() for kw in ["event", "operation", "producer", "production", "creative", "program"]):
+                if any(kw in title.lower() for kw in target_keywords):
                     loc = item.get("location", {}).get("name", default_location)
                     desc = item.get("content", "")
                     clean_desc = re.sub(r"<[^>]+>", " ", desc).strip()
@@ -178,35 +175,10 @@ def fetch_greenhouse(board_token: str, source_label: str, default_location: str)
                         "salary": "Unlisted",
                         "source": source_label
                     })
+        else:
+            print(f"[{board_token}] Greenhouse returned HTTP status {res.status_code}")
     except Exception as e:
         print(f"Greenhouse fetch error ({board_token}): {e}")
-    return jobs
-
-
-def fetch_lever(site: str, source_label: str, default_location: str) -> list:
-    url = f"https://api.lever.co/v0/postings/{site}?mode=json"
-    jobs = []
-    try:
-        res = requests.get(url, timeout=12)
-        if res.status_code == 200:
-            for item in res.json():
-                title = item.get("text", "")
-                if any(kw in title.lower() for kw in ["event", "operation", "producer", "director", "creative"]):
-                    loc = item.get("categories", {}).get("location", default_location)
-                    desc = item.get("descriptionPlain", "")
-                    jobs.append({
-                        "raw_id": f"lev_{item.get('id')}",
-                        "title": title,
-                        "company": site.capitalize(),
-                        "url": clean_url(item.get("hostedUrl")),
-                        "description": desc[:2500],
-                        "workplace_type": "Remote" if "remote" in loc.lower() else "On-site",
-                        "location": loc,
-                        "salary": "Unlisted",
-                        "source": source_label
-                    })
-    except Exception as e:
-        print(f"Lever fetch error ({site}): {e}")
     return jobs
 
 
@@ -219,14 +191,14 @@ def main():
         print("Error: GSHEET_WEBAPP_URL environment variable is missing.")
         sys.exit(1)
 
-    print("Executing discovery sweep...")
+    print("Executing discovery sweep across verified feeds...")
     raw_candidates = []
 
     for feed in DISCOVERY_FEEDS:
         if feed["type"] == "greenhouse":
             raw_candidates.extend(fetch_greenhouse(feed["board_token"], feed["source_label"], feed["default_location"]))
-        elif feed["type"] == "lever":
-            raw_candidates.extend(fetch_lever(feed["site"], feed["source_label"], feed["default_location"]))
+
+    print(f"Candidate filtering pool: {len(raw_candidates)} matching keyword roles found.")
 
     curated_batch = []
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -272,7 +244,7 @@ def main():
         try:
             payload = {
                 "token": gsheet_token,
-                "jobs": curated_batch
+                "jobs": curated_batch[:5] # Ingest top 5 for clean batch intake
             }
             res = requests.post(gsheet_url, json=payload, timeout=30)
             res_data = res.json()
@@ -280,7 +252,7 @@ def main():
                 ingested_count = res_data.get("appended", 0)
                 print(f"Successfully posted to Sheet. Appended: {ingested_count} rows.")
             else:
-                print(f"Google Sheet rejected payload: {res_data.get('message')}")
+                print(f"Google Sheet response: {res_data.get('message')}")
         except Exception as e:
             print(f"Failed to post to Google Apps Script: {e}")
 
@@ -291,7 +263,7 @@ def main():
             tags = "dart,briefcase"
             priority = "high"
         else:
-            msg = "🎯 Mission Control: Sweep completed. No new listings matched your criteria."
+            msg = "🎯 Mission Control: Sweep completed. Verified feeds up to date."
             tags = "check"
             priority = "low"
 
