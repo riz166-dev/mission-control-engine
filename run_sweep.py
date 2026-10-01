@@ -328,13 +328,13 @@ def fetch_adzuna_jobs() -> list:
         print("[Adzuna] Credentials not set in environment (ADZUNA_APP_ID/ADZUNA_APP_KEY), skipping.")
         return []
 
-    jobs = []
     queries = [
-        {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
-        {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
-        {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
-        {"what": "Creative Operations Producer Remote", "where": None, "dist": None}
-    ]
+    {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
+    {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
+    {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
+    {"what": "Director of Events Remote", "where": None, "dist": None},
+    {"what": "Experiential Producer Remote", "where": None, "dist": None}
+]
 
     for q in queries:
         try:
