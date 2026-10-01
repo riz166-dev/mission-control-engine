@@ -132,52 +132,68 @@ def clean_html_description(raw_html: str) -> str:
 
 def resolve_full_job_description(target_url: str, fallback_desc: str) -> str:
     """
-    Stage 2 Resolution: Follows redirect to origin page and extracts
-    the complete corporate job description to avoid snippet traps.
+    Stage 2 Resolution: Follows Adzuna tracking wrappers to the final ATS/corporate
+    destination and extracts the true, multi-paragraph corporate requisition.
     """
     if not target_url or not target_url.startswith("http"):
         return fallback_desc
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
     try:
         session = requests.Session()
-        res = session.get(target_url, headers=headers, timeout=10, allow_redirects=True)
+        # Follow all hops through Adzuna redirect wrappers to reach the final page
+        res = session.get(target_url, headers=headers, timeout=12, allow_redirects=True)
         if res.status_code != 200:
             return fallback_desc
 
+        final_url = res.url.lower()
+
+        # If redirected to a direct Greenhouse JSON-compatible board:
+        if "boards.greenhouse.io" in final_url:
+            match = re.search(r"jobs/(\d+)", final_url)
+            if match:
+                gh_id = match.group(1)
+                gh_api = f"https://boards-api.greenhouse.io/v1/boards/{final_url.split('/')[3]}/jobs/{gh_id}"
+                api_res = session.get(gh_api, timeout=8)
+                if api_res.status_code == 200:
+                    return clean_html_description(api_res.json().get("content", fallback_desc))
+
+        # Direct HTML Parsing for standard career pages and ATS engines
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # Strip scripts, styles, navigations, footers
-        for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "svg", "button"]):
             tag.extract()
 
-        # Target standard semantic job description containers
+        # High-probability semantic containers across Lever, Workday, Bamboo, Indeed, etc.
         candidates = [
-            soup.find("div", class_=re.compile(r"(job[-_]?description|posting[-_]?content|description)", re.I)),
+            soup.find(class_=re.compile(r"(job[-_]?description|posting[-_]?content|job-details|desc|section-description)", re.I)),
+            soup.find(id=re.compile(r"(job[-_]?description|posting[-_]?content|jobDetails)", re.I)),
             soup.find("main"),
             soup.find("article"),
-            soup.find("div", id=re.compile(r"(job[-_]?description|posting[-_]?content)", re.I))
+            soup.find("section", class_=re.compile(r"description", re.I))
         ]
 
         for cand in candidates:
             if cand:
                 extracted = clean_html_description(cand.get_text("\n"))
-                if len(extracted) > len(fallback_desc) and len(extracted) > 300:
+                # Require substantial length to prevent capturing small nav crumbs
+                if len(extracted) > 600:
                     return extracted
 
-        # If specific container not found, extract body text
+        # General body fallback if clean and substantial
         if soup.body:
             body_text = clean_html_description(soup.body.get_text("\n"))
-            if len(body_text) > len(fallback_desc) and len(body_text) > 300:
-                # Truncate extremely long pages if necessary
-                return body_text[:6000]
+            if len(body_text) > 800:
+                # Capture up to 5,000 characters of clean requisition text
+                return body_text[:5000]
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Deep-Fetch Debug] Failed resolution for {target_url[:60]}: {e}")
 
     return fallback_desc
 
