@@ -352,10 +352,10 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
         status = "Parked"
         notes.append("Auto-parked for remote audit: verify leadership scope vs. isolated IC churn.")
     elif is_austin:
-        # Fast-Track senior leadership matches OR scores >= 84
-        if score >= 84 or (is_senior_title and score >= 78):
+        # Fast-Track any Austin leadership role (score >= 75) OR high-alignment operational role (score >= 84)
+        if (is_senior_title and score >= 75) or score >= 84:
             status = "Fast-Track"
-            notes.append("Local Austin operational fit meeting high-alignment criteria.")
+            notes.append("Local Austin operational leadership fit meeting Fast-Track criteria.")
         else:
             status = "Inbox"
             notes.append("Local Austin posting placed in Inbox for candidate review.")
