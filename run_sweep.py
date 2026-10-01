@@ -2,7 +2,8 @@
 """
 Mission Control Autonomous Discovery & Ingestion Engine
 Crawls broad-market aggregators (Adzuna) and direct ATS targets.
-Enforces the 3-Pillar Boolean Essence Evaluation (Seniority + Domain + Operational DNA),
+Features Two-Stage Requisition Resolution (deep-fetching full corporate JDs),
+enforces the 3-Pillar Boolean Essence Evaluation (Seniority + Domain + Operational DNA),
 contract tenure filtering (>= 12 months), hourly-to-annual compensation conversion,
 and tags granular sources.
 Pushes authenticated JSON to Google Sheet Webhook + sends mobile push alerts.
@@ -16,6 +17,7 @@ import html
 import hashlib
 from datetime import datetime, timezone
 import requests
+from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------
 # Candidate Profile Calibration Rules
@@ -35,7 +37,10 @@ TITLE_EXCLUSIONS = [
     r"\bqa engineer\b",
     r"\bit director\b",
     r"\bcloud architect\b",
-    r"\bsolutions architect\b"
+    r"\bsolutions architect\b",
+    r"\bproduct manager\b",
+    r"\bhead of product\b",
+    r"\bproduct owner\b"
 ]
 
 # 2. Hard Disqualifiers in Description
@@ -54,6 +59,7 @@ HARD_DISQUALIFIERS = [
     r"\bb2b enterprise marketing\b",
     r"\benterprise saas marketing\b",
     r"\bsaas marketing\b",
+    r"\bfintech\b",
     r"\breposted\b"
 ]
 
@@ -124,6 +130,58 @@ def clean_html_description(raw_html: str) -> str:
     return text
 
 
+def resolve_full_job_description(target_url: str, fallback_desc: str) -> str:
+    """
+    Stage 2 Resolution: Follows redirect to origin page and extracts
+    the complete corporate job description to avoid snippet traps.
+    """
+    if not target_url or not target_url.startswith("http"):
+        return fallback_desc
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+
+    try:
+        session = requests.Session()
+        res = session.get(target_url, headers=headers, timeout=10, allow_redirects=True)
+        if res.status_code != 200:
+            return fallback_desc
+
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # Strip scripts, styles, navigations, footers
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+            tag.extract()
+
+        # Target standard semantic job description containers
+        candidates = [
+            soup.find("div", class_=re.compile(r"(job[-_]?description|posting[-_]?content|description)", re.I)),
+            soup.find("main"),
+            soup.find("article"),
+            soup.find("div", id=re.compile(r"(job[-_]?description|posting[-_]?content)", re.I))
+        ]
+
+        for cand in candidates:
+            if cand:
+                extracted = clean_html_description(cand.get_text("\n"))
+                if len(extracted) > len(fallback_desc) and len(extracted) > 300:
+                    return extracted
+
+        # If specific container not found, extract body text
+        if soup.body:
+            body_text = clean_html_description(soup.body.get_text("\n"))
+            if len(body_text) > len(fallback_desc) and len(body_text) > 300:
+                # Truncate extremely long pages if necessary
+                return body_text[:6000]
+
+    except Exception:
+        pass
+
+    return fallback_desc
+
+
 def compute_content_fingerprint(text: str) -> str:
     """Produces a consistent 16-character deduplication hash."""
     normalized = re.sub(r"\s+", " ", text.lower().strip())
@@ -136,14 +194,12 @@ def parse_salary(salary_str: str) -> tuple[int, int]:
     if not salary_str:
         return (0, 0)
 
-    # Check for hourly rates (e.g. $55/hr - $59/hr)
     if "/hr" in salary_str.lower() or "hour" in salary_str.lower():
         hourly_matches = re.findall(r"\$([0-9]{2,3}(?:\.[0-9]{2})?)", salary_str)
         if hourly_matches:
             hourly_nums = [float(h) for h in hourly_matches]
             return (int(min(hourly_nums) * 2080), int(max(hourly_nums) * 2080))
 
-    # Standard annual figures ($95,000 - $120,000)
     nums = re.findall(r"\$([0-9]{1,3}(?:,[0-9]{3})*)", salary_str)
     if nums:
         int_nums = [int(n.replace(",", "")) for n in nums]
@@ -157,7 +213,6 @@ def scrub_description_for_salary(text: str) -> str:
     if not text:
         return "Unlisted"
 
-    # Match hourly: $50/hr - $60/hr
     hourly_pat = r"\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:-|to)\s*\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:/hr|hr|per hour)"
     h_match = re.search(hourly_pat, text, re.IGNORECASE)
     if h_match:
@@ -165,7 +220,6 @@ def scrub_description_for_salary(text: str) -> str:
         h_max = float(h_match.group(2))
         return f"${h_min:.0f}/hr - ${h_max:.0f}/hr (Est. ${int(h_min*2080):,} - ${int(h_max*2080):,}/yr)"
 
-    # Match annual: $120,000 - $150,000
     annual_pat = r"\$([0-9]{2,3}(?:,[0-9]{3})+)(?:\s*(?:-|to)\s*\$([0-9]{2,3}(?:,[0-9]{3})+))?"
     a_match = re.search(annual_pat, text)
     if a_match:
@@ -201,7 +255,7 @@ def check_boolean_essence(title: str, description: str) -> tuple[bool, list]:
             return False, [f"Disqualified by dealbreaker: matches exclusion '{pat}'."]
     for pat in TITLE_EXCLUSIONS:
         if re.search(pat, title_clean):
-            return False, [f"Filtered: Excluded technical title pattern '{pat}'."]
+            return False, [f"Filtered: Excluded technical/product title pattern '{pat}'."]
 
     # Check contract tenure
     is_contract_valid, contract_msg = check_contract_eligibility(full_text)
@@ -244,6 +298,7 @@ def check_boolean_essence(title: str, description: str) -> tuple[bool, list]:
 
 def evaluate_job(title: str, description: str, workplace_type: str, location: str, salary_str: str) -> dict:
     """Evaluates candidate calibration gates, match scoring, and category routing."""
+    title_lower = title.lower()
     full_text = f"{title}\n{description}\n{location}".lower()
 
     # Step 1: Boolean Essence Gate
@@ -290,14 +345,17 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
 
     is_remote = "remote" in workplace_type.lower() or "remote" in location.lower()
     is_austin = any(marker in location.lower() for marker in ["austin", "787", "del valle", "round rock", "travis", "q2"])
+    is_senior_title = any(re.search(pat, title_lower) for pat in [r"\bdirector\b", r"\bhead\b", r"\bexecutive\b", r"\bsenior producer\b", r"\bsr\. producer\b"])
 
+    # Autonomous Category Routing
     if is_remote:
         status = "Parked"
         notes.append("Auto-parked for remote audit: verify leadership scope vs. isolated IC churn.")
     elif is_austin:
-        if score >= 90:
+        # Fast-Track senior leadership matches OR scores >= 84
+        if score >= 84 or (is_senior_title and score >= 78):
             status = "Fast-Track"
-            notes.append("Local Austin operational fit meeting high-alignment scoring criteria.")
+            notes.append("Local Austin operational fit meeting high-alignment criteria.")
         else:
             status = "Inbox"
             notes.append("Local Austin posting placed in Inbox for candidate review.")
@@ -320,7 +378,7 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
 
 
 def fetch_adzuna_jobs() -> list:
-    """Queries Adzuna API for Austin Metro and Remote event/experiential operations roles."""
+    """Queries Adzuna API with Two-Stage Deep Resolution."""
     app_id = os.environ.get("ADZUNA_APP_ID")
     app_key = os.environ.get("ADZUNA_APP_KEY")
 
@@ -328,13 +386,14 @@ def fetch_adzuna_jobs() -> list:
         print("[Adzuna] Credentials not set in environment (ADZUNA_APP_ID/ADZUNA_APP_KEY), skipping.")
         return []
 
+    jobs = []
     queries = [
-    {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
-    {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
-    {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
-    {"what": "Director of Events Remote", "where": None, "dist": None},
-    {"what": "Experiential Producer Remote", "where": None, "dist": None}
-]
+        {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
+        {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
+        {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
+        {"what": "Director of Events Remote", "where": None, "dist": None},
+        {"what": "Experiential Producer Remote", "where": None, "dist": None}
+    ]
 
     for q in queries:
         try:
@@ -358,7 +417,7 @@ def fetch_adzuna_jobs() -> list:
                 for item in results:
                     title = item.get("title", "")
                     company = item.get("company", {}).get("display_name", "Corporate Employer")
-                    desc = clean_html_description(item.get("description", ""))
+                    snippet_desc = clean_html_description(item.get("description", ""))
                     loc_name = item.get("location", {}).get("display_name", target_loc)
                     raw_url = item.get("redirect_url", "")
 
@@ -371,12 +430,18 @@ def fetch_adzuna_jobs() -> list:
                         sal_str = f"${int(sal_min):,}+"
 
                     is_rem = "remote" in q["what"].lower() or "remote" in loc_name.lower()
+                    final_url = clean_url(raw_url)
+
+                    # Stage 2: Deep Resolution if short snippet
+                    resolved_desc = snippet_desc
+                    if len(snippet_desc) < 500 and final_url:
+                        resolved_desc = resolve_full_job_description(final_url, snippet_desc)
 
                     jobs.append({
                         "title": title,
                         "company": company,
-                        "url": clean_url(raw_url),
-                        "description": desc,
+                        "url": final_url,
+                        "description": resolved_desc,
                         "workplace_type": "Remote" if is_rem else "Hybrid",
                         "location": loc_name,
                         "salary": sal_str,
@@ -456,7 +521,7 @@ def main():
     print("Executing discovery sweep across broad-market boards & ATS endpoints...")
     raw_candidates = []
 
-    # 1. Broad Aggregator (Adzuna)
+    # 1. Broad Aggregator with Stage 2 Resolution (Adzuna)
     raw_candidates.extend(fetch_adzuna_jobs())
 
     # 2. Curated Direct ATS Feeds
