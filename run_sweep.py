@@ -444,9 +444,10 @@ def fetch_adzuna_jobs() -> list:
                     is_rem = "remote" in q["what"].lower() or "remote" in loc_name.lower()
                     final_url = clean_url(raw_url)
 
-                    # Stage 2: Deep Resolution if short snippet
+                    # Stage 2: Deep Resolution if ends with ellipsis or shorter than standard JD
                     resolved_desc = snippet_desc
-                    if len(snippet_desc) < 500 and final_url:
+                    is_truncated = snippet_desc.strip().endswith("...") or len(snippet_desc) < 1800
+                    if is_truncated and final_url:
                         resolved_desc = resolve_full_job_description(final_url, snippet_desc)
 
                     jobs.append({
