@@ -20,7 +20,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install requests
+          pip install requests beautifulsoup4
 
       - name: Execute Discovery & Push
         env:
