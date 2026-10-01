@@ -181,7 +181,6 @@ def resolve_full_job_description(target_url: str, fallback_desc: str) -> str:
         for cand in candidates:
             if cand:
                 extracted = clean_html_description(cand.get_text("\n"))
-                # Require substantial length to prevent capturing small nav crumbs
                 if len(extracted) > 600:
                     return extracted
 
@@ -189,7 +188,6 @@ def resolve_full_job_description(target_url: str, fallback_desc: str) -> str:
         if soup.body:
             body_text = clean_html_description(soup.body.get_text("\n"))
             if len(body_text) > 800:
-                # Capture up to 5,000 characters of clean requisition text
                 return body_text[:5000]
 
     except Exception as e:
