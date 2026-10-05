@@ -1,617 +1,304 @@
-#!/usr/bin/env python3
-"""
-Mission Control Autonomous Discovery & Ingestion Engine
-Crawls broad-market aggregators (Adzuna) and direct ATS targets.
-Features Two-Stage Requisition Resolution (deep-fetching full corporate JDs),
-enforces the 3-Pillar Boolean Essence Evaluation (Seniority + Domain + Operational DNA),
-contract tenure filtering (>= 12 months), hourly-to-annual compensation conversion,
-and tags granular sources.
-Pushes authenticated JSON to Google Sheet Webhook + sends mobile push alerts.
-"""
-
 import os
 import re
 import sys
 import json
-import html
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime
 import requests
-from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------
-# Candidate Profile Calibration Rules
+# 1. CANDIDATE PROFILE & GATE DEFINITIONS
 # ---------------------------------------------------------
-SALARY_STRICT_FLOOR = 75000
-SALARY_TARGET_MIN = 90000
+AUSTIN_KEYWORDS = ["austin", "78701", "78758", "78735", "78752", "78704", "del valle", "travis county"]
 
-# 1. Hard Disqualifiers in Title
-TITLE_EXCLUSIONS = [
-    r"\bsoftware engineer\b",
-    r"\bfull[- ]stack\b",
-    r"\bbackend\b",
-    r"\bfrontend\b",
-    r"\bdevops\b",
-    r"\bdata engineer\b",
-    r"\btechnical architect\b",
-    r"\bqa engineer\b",
-    r"\bit director\b",
-    r"\bcloud architect\b",
-    r"\bsolutions architect\b",
-    r"\bproduct manager\b",
-    r"\bhead of product\b",
-    r"\bproduct owner\b"
+# Tier A: Seniority / Level
+SENIORITY_LEVELS = [
+    "director", "manager", "lead", "head", "producer", 
+    "vp", "vice president", "chief", "principal", "specialist"
 ]
 
-# 2. Hard Disqualifiers in Description
-HARD_DISQUALIFIERS = [
-    r"\bbusiness development\b",
-    r"\bclient acquisition\b",
-    r"\bticket sales\b",
-    r"\bsales quotas?\b",
-    r"\btrade show booth\b",
-    r"\bexhibit hall\b",
-    r"\bdrayage\b",
-    r"\bcommission only\b",
-    r"\bcold call(ing)?\b",
-    r"\bkubernetes\b",
-    r"\bci/cd pipelines?\b",
-    r"\bb2b enterprise marketing\b",
-    r"\benterprise saas marketing\b",
-    r"\bsaas marketing\b",
-    r"\bfintech\b",
-    r"\breposted\b"
+# Tier B: Core Functional Discipline
+EVENT_DOMAINS = [
+    "event", "events", "experiential", "experience", 
+    "experiences", "production", "festival", "gathering", "entertainment"
 ]
 
-# Short-term contract disqualifiers (< 1 year)
-SHORT_TERM_CONTRACT_PATTERNS = [
-    r"\b(1|2|3|4|5|6|7|8|9|10|11)[- ]month (contract|assignment|temp|duration)\b",
-    r"\b(1|2|3|4|5|6|7|8|9|10|11) months (contract|assignment|temp|duration)\b",
-    r"\bcontract[- ]to[- ]hire for (3|6) months\b",
-    r"\bshort[- ]term contract\b",
-    r"\btemporary role for (3|6) months\b"
+# Hard Functional Blockers in Title (Instant Rejection)
+TITLE_BLOCKERS = [
+    "product", "hr", "human resources", "sales", "account executive",
+    "business development", "security", "drayage", "booth", "social media",
+    "it operations", "warehouse", "culinary", "restaurant", "catering sales",
+    "pharma", "speaker bureau"
 ]
 
-# 3. High-Alignment Multipliers (Clean Word Boundaries)
-POSITIVE_MULTIPLIERS = [
-    "run-of-show", "stadium", "festival", "mass gathering", "permitting",
-    "apd", "afd", r"\bems\b", "clickup", "asana", "figma", "canva", "pmp",
-    "vendor procurement", "experiential", "activation", "production", "logistics"
+# Hard Disqualifiers in Body
+EXCLUDED_INDUSTRIES = ["crypto", "web3", "gambling", "casino", "sports betting"]
+EXCLUDED_DUTIES = [
+    "ticket sales", "cold call", "cold outreach", "business development manager",
+    "booth sales", "drayage", "exhibit sales", "sponsorship sales", 
+    "client acquisition quotas", "exhibitor freight"
 ]
+
+CREATIVE_TOOLS = ["canva", "figma", "clickup", "asana", "airtable"]
 
 # ---------------------------------------------------------
-# Curated Direct ATS Feeds
+# 2. BOOLEAN & TEXT EVALUATION LOGIC
 # ---------------------------------------------------------
-DISCOVERY_FEEDS = [
-    {
-        "type": "lever",
-        "site": "twooakventures",
-        "source_label": "Two Oak / Austin FC (Q2 Stadium)",
-        "default_location": "Austin, TX (Q2 Stadium)"
-    },
-    {
-        "type": "greenhouse",
-        "board_token": "c3presents",
-        "source_label": "Greenhouse (C3 Presents / Live Nation)",
-        "default_location": "Austin, TX"
-    },
-    {
-        "type": "greenhouse",
-        "board_token": "yeti",
-        "source_label": "Greenhouse (YETI Experiential)",
-        "default_location": "Austin, TX 78735"
-    }
-]
-
-
-def clean_url(url: str) -> str:
-    """Strip UTM tracking and syndication query tokens."""
-    if not url:
-        return ""
-    clean = re.sub(r"([?&])(utm_[^&]+|ref=[^&]+|gh_src=[^&]+|lever-source=[^&]+)", "", url)
-    return clean.rstrip("?&")
-
-
-def clean_html_description(raw_html: str) -> str:
-    """Converts raw HTML descriptions into clean, formatted plain text."""
-    if not raw_html:
-        return ""
-    text = html.unescape(raw_html)
-    text = text.replace("&nbsp;", " ").replace("\xa0", " ")
-    text = text.replace("&bull;", "•").replace("&middot;", "·")
-    text = text.replace("&rsquo;", "'").replace("&lsquo;", "'")
-    text = text.replace("&rdquo;", '"').replace("&ldquo;", '"')
-    text = text.replace("&amp;", "&")
-    text = re.sub(r"<(br|p|div|h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<li[^>]*>", "\n• ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
-    return text
-
-
-def resolve_full_job_description(target_url: str, fallback_desc: str) -> str:
+def title_clears_level_and_function_gate(title: str) -> bool:
     """
-    Stage 2 Resolution: Follows Adzuna tracking wrappers (including HTML meta-refreshes)
-    to the final destination and extracts the full corporate requisition.
+    Evaluates whether a job title satisfies the Level AND Function requirement
+    without triggering functional disqualifiers.
     """
-    if not target_url or not target_url.startswith("http"):
-        return fallback_desc
+    clean_title = title.lower()
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    # Step 1: Immediate ejection if title contains hard blockers
+    for blocker in TITLE_BLOCKERS:
+        if re.search(r'\b' + re.escape(blocker) + r'\b', clean_title):
+            return False
 
-    try:
-        session = requests.Session()
-        res = session.get(target_url, headers=headers, timeout=12, allow_redirects=True)
-        if res.status_code != 200:
-            return fallback_desc
+    # Step 2: Check for Seniority Level match
+    has_level = any(re.search(r'\b' + re.escape(lvl) + r'\b', clean_title) for lvl in SENIORITY_LEVELS)
 
-        soup = BeautifulSoup(res.text, "html.parser")
+    # Step 3: Check for Core Event Domain match
+    has_event_domain = any(re.search(r'\b' + re.escape(dom) + r'\b', clean_title) for dom in EVENT_DOMAINS)
 
-        # Check for HTML meta-refresh redirect (common on Adzuna landing hops)
-        meta_refresh = soup.find("meta", attrs={"http-equiv": re.compile(r"^refresh$", re.I)})
-        if meta_refresh and meta_refresh.get("content"):
-            content_str = meta_refresh["content"]
-            url_match = re.search(r"url=['\"]?(https?://[^'\"]+)", content_str, re.I)
-            if url_match:
-                dest_url = url_match.group(1)
-                res = session.get(dest_url, headers=headers, timeout=12, allow_redirects=True)
-                soup = BeautifulSoup(res.text, "html.parser")
+    # Step 4: Strict Operations Rule (Operations must be paired with Events/Production)
+    if "operation" in clean_title or "operations" in clean_title:
+        return has_level and has_event_domain
 
-        # Strip non-content chrome
-        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "svg", "button"]):
-            tag.extract()
+    return has_level and has_event_domain
 
-        # Target high-probability semantic job containers
-        containers = [
-            soup.find("div", class_=re.compile(r"(job[-_]?description|posting[-_]?content|job-details|description|role-description)", re.I)),
-            soup.find("section", class_=re.compile(r"(job[-_]?description|posting[-_]?content|description)", re.I)),
-            soup.find("div", id=re.compile(r"(job[-_]?description|posting[-_]?content|jobDetails)", re.I)),
-            soup.find("main"),
-            soup.find("article")
-        ]
+def extract_salary_range(text: str):
+    matches = re.findall(r'\$(\d{2,3}),?(\d{3})?', text)
+    if not matches:
+        return None, None
+    salaries = []
+    for m in matches:
+        val_str = m[0] + (m[1] if m[1] else "000")
+        try:
+            salaries.append(int(val_str))
+        except ValueError:
+            continue
+    if salaries:
+        return min(salaries), max(salaries)
+    return None, None
 
-        for cand in containers:
-            if cand:
-                extracted = clean_html_description(cand.get_text("\n"))
-                # Must be substantially longer than the snippet to qualify
-                if len(extracted) > 600 and len(extracted) > len(fallback_desc) + 150:
-                    return extracted
+def evaluate_job(raw_job: dict) -> dict:
+    title = raw_job.get("title", "")
+    description = raw_job.get("description", "")
+    location = raw_job.get("location", "")
+    full_text = f"{title} {description} {location}".lower()
 
-        # General body fallback if clean and substantial
-        if soup.body:
-            body_text = clean_html_description(soup.body.get_text("\n"))
-            if len(body_text) > 800 and len(body_text) > len(fallback_desc) + 200:
-                return body_text[:6000]
+    # 1. Title Gate (Seniority x Function Matrix)
+    if not title_clears_level_and_function_gate(title):
+        return None
 
-    except Exception as e:
-        print(f"[Deep-Fetch] Error resolving {target_url[:50]}: {e}")
+    # 2. Hard Disqualifiers: Repost Check
+    if "reposted" in full_text or raw_job.get("is_repost", False):
+        return None
 
-    return fallback_desc
+    # 3. Hard Disqualifiers: Excluded Industries
+    for ind in EXCLUDED_INDUSTRIES:
+        if ind in full_text:
+            return None
 
+    # 4. Hard Disqualifiers: Sales Quotas & Trade Show Drayage
+    for duty in EXCLUDED_DUTIES:
+        if duty in full_text:
+            return None
 
-def compute_content_fingerprint(text: str) -> str:
-    """Produces a consistent 16-character deduplication hash."""
-    normalized = re.sub(r"\s+", " ", text.lower().strip())
-    seed = normalized[:220] if len(normalized) >= 180 else normalized
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    # 5. Location Gate: Austin Metro vs US Remote
+    is_remote = "remote" in full_text or "remote" in location.lower() or raw_job.get("is_remote", False)
+    is_austin = any(k in location.lower() or k in full_text for k in AUSTIN_KEYWORDS)
 
+    if not is_remote and not is_austin:
+        return None  # Rejects non-Austin on-site/hybrid
 
-def parse_salary(salary_str: str) -> tuple[int, int]:
-    """Extracts minimum and maximum annual values (converts hourly rates via 2,080 hrs/yr)."""
-    if not salary_str:
-        return (0, 0)
+    # 6. Strict Compensation Floor
+    sal_min = raw_job.get("salary_min")
+    sal_max = raw_job.get("salary_max")
+    
+    if sal_min is None and sal_max is None:
+        text_min, text_max = extract_salary_range(full_text)
+        sal_min, sal_max = text_min, text_max
 
-    if "/hr" in salary_str.lower() or "hour" in salary_str.lower():
-        hourly_matches = re.findall(r"\$([0-9]{2,3}(?:\.[0-9]{2})?)", salary_str)
-        if hourly_matches:
-            hourly_nums = [float(h) for h in hourly_matches]
-            return (int(min(hourly_nums) * 2080), int(max(hourly_nums) * 2080))
+    if sal_max and sal_max < 75000:
+        return None  # Under $75k floor
 
-    nums = re.findall(r"\$([0-9]{1,3}(?:,[0-9]{3})*)", salary_str)
-    if nums:
-        int_nums = [int(n.replace(",", "")) for n in nums]
-        return (min(int_nums), max(int_nums))
-
-    return (0, 0)
-
-
-def scrub_description_for_salary(text: str) -> str:
-    """Scans full description text for compensation patterns ($XX/hr or $XXX,XXX/yr)."""
-    if not text:
-        return "Unlisted"
-
-    hourly_pat = r"\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:-|to)\s*\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:/hr|hr|per hour)"
-    h_match = re.search(hourly_pat, text, re.IGNORECASE)
-    if h_match:
-        h_min = float(h_match.group(1))
-        h_max = float(h_match.group(2))
-        return f"${h_min:.0f}/hr - ${h_max:.0f}/hr (Est. ${int(h_min*2080):,} - ${int(h_max*2080):,}/yr)"
-
-    annual_pat = r"\$([0-9]{2,3}(?:,[0-9]{3})+)(?:\s*(?:-|to)\s*\$([0-9]{2,3}(?:,[0-9]{3})+))?"
-    a_match = re.search(annual_pat, text)
-    if a_match:
-        if a_match.group(2):
-            return f"${a_match.group(1)} - ${a_match.group(2)}"
-        return f"${a_match.group(1)}"
-
-    return "Unlisted"
-
-
-def check_contract_eligibility(full_text: str) -> tuple[bool, str]:
-    """Evaluates contract roles: allows contracts >= 1 year, rejects short-term gigs."""
-    for pat in SHORT_TERM_CONTRACT_PATTERNS:
-        if re.search(pat, full_text):
-            return False, f"Disqualified: Contract duration under 12-month minimum ({pat})."
-    return True, "Eligible tenure (permanent or contract >= 1 year)."
-
-
-def check_boolean_essence(title: str, description: str) -> tuple[bool, list]:
-    """
-    Evaluates role against the 3-Pillar Boolean Essence:
-    Pillar 1: Seniority / Leadership Anchor
-    Pillar 2: Event / Experiential / Production Domain
-    Pillar 3: Operational & Logistics DNA
-    """
-    title_clean = title.lower()
-    desc_clean = description.lower()
-    full_text = f"{title_clean}\n{desc_clean}"
-
-    # Gate A: Negative Exclusions
-    for pat in HARD_DISQUALIFIERS:
-        if re.search(pat, full_text):
-            return False, [f"Disqualified by dealbreaker: matches exclusion '{pat}'."]
-    for pat in TITLE_EXCLUSIONS:
-        if re.search(pat, title_clean):
-            return False, [f"Filtered: Excluded technical/product title pattern '{pat}'."]
-
-    # Check contract tenure
-    is_contract_valid, contract_msg = check_contract_eligibility(full_text)
-    if not is_contract_valid:
-        return False, [contract_msg]
-
-    # Pillar 1: Seniority / Leadership Anchor
-    seniority_terms = [
-        r"\bdirector\b", r"\bhead\b", r"\blead\b", r"\bmanager\b",
-        r"\bproducer\b", r"\bexecutive\b", r"\bproject manager\b", r"\bprogram manager\b",
-        r"\bspecialist\b"
-    ]
-    has_seniority = any(re.search(pat, title_clean) for pat in seniority_terms)
-
-    # Pillar 2: Core Domain Anchor
-    domain_terms = [
-        r"\bevent(s)?\b", r"\bexperiential\b", r"\bproduction\b",
-        r"\bactivation(s)?\b", r"\bfestival\b", r"\blive entertainment\b",
-        r"\bguest experience\b", r"\bvenue\b", r"\bcreative operations\b"
-    ]
-    has_domain_in_title = any(re.search(pat, title_clean) for pat in domain_terms)
-    domain_body_hits = sum(1 for pat in domain_terms if re.search(pat, desc_clean))
-
-    if not (has_domain_in_title or domain_body_hits >= 2):
-        return False, ["Lacks core event/experiential/production domain foundation."]
-
-    # Pillar 3: Operational DNA (Execution, Logistics, Run-of-show)
-    ops_terms = [
-        "run-of-show", "logistics", "vendor management", "vendor procurement",
-        "permitting", "budget", "cross-functional", "load-in", "site operations",
-        "staging", "timeline", "milestones", "fabrication"
-    ]
-    matched_dna = [term for term in ops_terms if term in desc_clean]
-
-    if not matched_dna and not has_seniority:
-        return False, ["Lacks operational/production execution DNA."]
-
-    return True, matched_dna
-
-
-def evaluate_job(title: str, description: str, workplace_type: str, location: str, salary_str: str) -> dict:
-    """Evaluates candidate calibration gates, match scoring, and category routing."""
-    title_lower = title.lower()
-    full_text = f"{title}\n{description}\n{location}".lower()
-
-    # Step 1: Boolean Essence Gate
-    passed_essence, essence_notes = check_boolean_essence(title, description)
-    if not passed_essence:
-        return {
-            "passed": False,
-            "score": 40,
-            "status": "Passed",
-            "notes": essence_notes
-        }
-
-    # Step 2: Salary Scrubbing & Conversion
-    if salary_str == "Unlisted":
-        scrubbed = scrub_description_for_salary(description)
-        if scrubbed != "Unlisted":
-            salary_str = scrubbed
-
-    sal_min, sal_max = parse_salary(salary_str)
-    if sal_max > 0 and sal_max < SALARY_STRICT_FLOOR:
-        return {
-            "passed": False,
-            "score": 45,
-            "status": "Passed",
-            "notes": [f"Salary ${sal_max:,} below strict ${SALARY_STRICT_FLOOR:,} walk-away floor."]
-        }
-
-    # Step 3: Match Scoring
-    score = 75
+    # 7. Scoring Engine & Operational Categorization
+    match_score = 75
     notes = []
 
-    if essence_notes:
-        notes.append(f"Operational DNA matched: {', '.join(essence_notes[:3])}.")
+    if any(k in full_text for k in ["operations", "logistics", "production", "run of show", "budget"]):
+        match_score += 10
+        notes.append("Operational Leadership: High alignment with live production & operational execution.")
 
-    matched_multipliers = []
-    for m in POSITIVE_MULTIPLIERS:
-        if re.search(m, full_text):
-            clean_name = m.replace(r"\b", "")
-            matched_multipliers.append(clean_name)
+    found_tools = [t.title() for t in CREATIVE_TOOLS if t in full_text]
+    if found_tools:
+        match_score += 10
+        notes.append(f"Visual / Workflow Synergies: Mentions {', '.join(found_tools)}.")
 
-    score += min(len(matched_multipliers) * 3, 20)
-    if matched_multipliers:
-        notes.append(f"Profile multipliers matched: {', '.join(matched_multipliers[:3])}.")
-
-    is_remote = "remote" in workplace_type.lower() or "remote" in location.lower()
-    is_austin = any(marker in location.lower() for marker in ["austin", "787", "del valle", "round rock", "travis", "q2"])
-    is_senior_title = any(re.search(pat, title_lower) for pat in [r"\bdirector\b", r"\bhead\b", r"\bexecutive\b", r"\bsenior producer\b", r"\bsr\. producer\b"])
-
-    # Autonomous Category Routing
+    # Workplace Type & Fast-Track Routing
     if is_remote:
+        workplace_type = "Remote"
         status = "Parked"
-        notes.append("Auto-parked for remote audit: verify leadership scope vs. isolated IC churn.")
+        notes.append("Remote Policy: Auto-parked for team structure audit and travel verification.")
     elif is_austin:
-        # Fast-Track any Austin leadership role (score >= 75) OR high-alignment operational role (score >= 84)
-        if (is_senior_title and score >= 75) or score >= 84:
+        workplace_type = "Hybrid" if "hybrid" in full_text else "On-site"
+        if match_score >= 85:
             status = "Fast-Track"
-            notes.append("Local Austin operational leadership fit meeting Fast-Track criteria.")
+            notes.append("Austin Anchor: Strong local operational fit within target radius.")
         else:
             status = "Inbox"
-            notes.append("Local Austin posting placed in Inbox for candidate review.")
     else:
-        status = "Parked"
-        notes.append(f"Regional/National scope ({location}) staged for geographic review.")
+        workplace_type = "On-site"
+        status = "Inbox"
 
-    if salary_str and salary_str != "Unlisted":
-        notes.append(f"Compensation verified: {salary_str}.")
+    # Format salary string
+    if sal_min and sal_max:
+        salary_str = f"${int(sal_min):,} - ${int(sal_max):,}"
+    elif sal_min:
+        salary_str = f"${int(sal_min):,}+"
     else:
-        notes.append("Salary unlisted; estimated according to executive scale.")
+        salary_str = "Unlisted (Estimated based on scope)"
+
+    # Stable deterministic ID
+    unique_key = raw_job.get("url") or f"{title}_{raw_job.get('company')}"
+    job_hash = hashlib.md5(unique_key.encode("utf-8")).hexdigest()[:6]
 
     return {
-        "passed": True,
-        "score": min(score, 98),
-        "status": status,
-        "salary": salary_str,
-        "notes": notes
+        "id": f"job_{job_hash}",
+        "title": title.strip(),
+        "company": raw_job.get("company", "Verified Employer").strip(),
+        "url": raw_job.get("url", ""),
+        "description": description.strip(),
+        "pipeline_state": {
+            "status": status,
+            "priority": "High" if status == "Fast-Track" else "Standard",
+            "date_posted": raw_job.get("date_posted", datetime.now().strftime("%Y-%m-%d")),
+            "date_fed": datetime.now().strftime("%Y-%m-%d"),
+            "source": raw_job.get("source", "Adzuna Sweep")
+        },
+        "details": {
+            "workplace_type": workplace_type,
+            "location": location.strip() if location else "Austin, TX",
+            "salary": salary_str
+        },
+        "evaluation": {
+            "match_score": min(match_score, 98),
+            "notes": notes
+        }
     }
 
-
+# ---------------------------------------------------------
+# 3. MARKET SWEEPER (Adzuna Austin + US Remote Queries)
+# ---------------------------------------------------------
 def fetch_adzuna_jobs() -> list:
-    """Queries Adzuna API with Two-Stage Deep Resolution."""
+    """
+    Sweeps Adzuna across both Austin Metro (25-mile radius) and US Remote
+    to capture high-conviction events, operations, and experience roles.
+    """
     app_id = os.environ.get("ADZUNA_APP_ID")
     app_key = os.environ.get("ADZUNA_APP_KEY")
-
+    
     if not app_id or not app_key:
-        print("[Adzuna] Credentials not set in environment (ADZUNA_APP_ID/ADZUNA_APP_KEY), skipping.")
+        print("Notice: Adzuna credentials not found. Skipping aggregator sweep.")
         return []
 
-    jobs = []
+    discovered = []
+    
+    # Dual query setup: Local Austin Metro + Nationwide Remote
     queries = [
-        {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
-        {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
-        {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
-        {"what": "Director of Events Remote", "where": None, "dist": None},
-        {"what": "Experiential Producer Remote", "where": None, "dist": None}
+        {"what": "Events OR Experiential OR Event Production", "where": "Austin, TX", "distance": "25", "is_remote": False},
+        {"what": "Director of Events OR Event Operations OR Experiential Manager", "where": "Remote", "distance": "0", "is_remote": True}
     ]
 
     for q in queries:
+        url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
+        params = {
+            "app_id": app_id,
+            "app_key": app_key,
+            "what": q["what"],
+            "where": q["where"],
+            "distance": q["distance"],
+            "results_per_page": 30,
+            "content-type": "application/json"
+        }
+
         try:
-            url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
-            params = {
-                "app_id": app_id,
-                "app_key": app_key,
-                "results_per_page": 20,
-                "what": q["what"],
-                "content-type": "application/json"
-            }
-            if q["where"]:
-                params["where"] = q["where"]
-                params["distance"] = q["dist"]
-
-            res = requests.get(url, params=params, timeout=12)
+            res = requests.get(url, params=params, timeout=15)
             if res.status_code == 200:
-                results = res.json().get("results", [])
-                target_loc = q["where"] if q["where"] else "Remote"
-                print(f"[Adzuna: '{q['what']}' in {target_loc}] Harvested {len(results)} listings.")
-                for item in results:
-                    title = item.get("title", "")
-                    company = item.get("company", {}).get("display_name", "Corporate Employer")
-                    snippet_desc = clean_html_description(item.get("description", ""))
-                    loc_name = item.get("location", {}).get("display_name", target_loc)
-                    raw_url = item.get("redirect_url", "")
-
-                    sal_min = item.get("salary_min")
-                    sal_max = item.get("salary_max")
-                    sal_str = "Unlisted"
-                    if sal_min and sal_max:
-                        sal_str = f"${int(sal_min):,} - ${int(sal_max):,}"
-                    elif sal_min:
-                        sal_str = f"${int(sal_min):,}+"
-
-                    is_rem = "remote" in q["what"].lower() or "remote" in loc_name.lower()
-                    final_url = clean_url(raw_url)
-
-                    # Stage 2: Deep Resolution if ends with ellipsis or shorter than standard JD
-                    resolved_desc = snippet_desc
-                    is_truncated = snippet_desc.strip().endswith("...") or len(snippet_desc) < 1800
-                    if is_truncated and final_url:
-                        resolved_desc = resolve_full_job_description(final_url, snippet_desc)
-
-                    jobs.append({
-                        "title": title,
-                        "company": company,
-                        "url": final_url,
-                        "description": resolved_desc,
-                        "workplace_type": "Remote" if is_rem else "Hybrid",
-                        "location": loc_name,
-                        "salary": sal_str,
-                        "source": f"Adzuna Aggregator ({company})"
+                data = res.json()
+                for item in data.get("results", []):
+                    discovered.append({
+                        "title": item.get("title", ""),
+                        "company": item.get("company", {}).get("display_name", "Verified Employer"),
+                        "url": item.get("redirect_url", ""),
+                        "description": item.get("description", ""),
+                        "location": item.get("location", {}).get("display_name", q["where"]),
+                        "salary_min": item.get("salary_min"),
+                        "salary_max": item.get("salary_max"),
+                        "date_posted": (item.get("created", "")[:10]) or datetime.now().strftime("%Y-%m-%d"),
+                        "source": "Adzuna Sweep",
+                        "is_remote": q["is_remote"]
                     })
             else:
-                print(f"[Adzuna] HTTP {res.status_code} on query '{q['what']}': {res.text[:120]}")
+                print(f"Notice: Adzuna returned status {res.status_code} for query '{q['where']}'")
         except Exception as e:
-            print(f"[Adzuna] Fetch error: {e}")
+            print(f"Notice: Error querying Adzuna: {e}")
 
-    return jobs
+    return discovered
 
-
-def fetch_greenhouse(board_token: str, source_label: str, default_location: str) -> list:
-    url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
-    jobs = []
-    try:
-        res = requests.get(url, timeout=12)
-        if res.status_code == 200:
-            job_list = res.json().get("jobs", [])
-            print(f"[{source_label}] Connected. Total raw listings: {len(job_list)}")
-            for item in job_list:
-                title = item.get("title", "")
-                loc = item.get("location", {}).get("name", default_location)
-                desc = clean_html_description(item.get("content", ""))
-                jobs.append({
-                    "title": title,
-                    "company": board_token.capitalize(),
-                    "url": clean_url(item.get("absolute_url")),
-                    "description": desc,
-                    "workplace_type": "Remote" if "remote" in loc.lower() else "Hybrid",
-                    "location": loc,
-                    "salary": "Unlisted",
-                    "source": source_label
-                })
-    except Exception as e:
-        print(f"Greenhouse fetch error ({source_label}): {e}")
-    return jobs
-
-
-def fetch_lever(site: str, source_label: str, default_location: str) -> list:
-    url = f"https://api.lever.co/v0/postings/{site}?mode=json"
-    jobs = []
-    try:
-        res = requests.get(url, timeout=12)
-        if res.status_code == 200:
-            items = res.json()
-            print(f"[{source_label}] Connected. Total raw listings: {len(items)}")
-            for item in items:
-                title = item.get("text", "")
-                loc = item.get("categories", {}).get("location", default_location)
-                desc = clean_html_description(item.get("descriptionPlain", ""))
-                jobs.append({
-                    "title": title,
-                    "company": site.replace("twooakventures", "Two Oak / Austin FC").capitalize(),
-                    "url": clean_url(item.get("hostedUrl")),
-                    "description": desc,
-                    "workplace_type": "Remote" if "remote" in loc.lower() else "On-site",
-                    "location": loc,
-                    "salary": "Unlisted",
-                    "source": source_label
-                })
-    except Exception as e:
-        print(f"Lever fetch error ({source_label}): {e}")
-    return jobs
-
-
+# ---------------------------------------------------------
+# 4. RUNTIME PIPELINE DISCOVERY, SYNC & NOTIFICATION
+# ---------------------------------------------------------
 def main():
-    gsheet_url = os.environ.get("GSHEET_WEBAPP_URL")
-    gsheet_token = os.environ.get("GSHEET_TOKEN", "mc_secure_token_78701")
-    ntfy_topic = os.environ.get("NTFY_TOPIC")
+    print("Starting Mission Control Autonomous Discovery Sweep...")
+    
+    raw_listings = fetch_adzuna_jobs()
+    print(f"Harvested {len(raw_listings)} raw listings from broad sweep.")
 
-    if not gsheet_url:
-        print("Error: GSHEET_WEBAPP_URL environment variable is missing.")
-        sys.exit(1)
+    curated_jobs = []
+    for raw in raw_listings:
+        evaluated = evaluate_job(raw)
+        if evaluated:
+            curated_jobs.append(evaluated)
 
-    print("Executing discovery sweep across broad-market boards & ATS endpoints...")
-    raw_candidates = []
+    print(f"Filtered down to {len(curated_jobs)} matching role(s).")
 
-    # 1. Broad Aggregator with Stage 2 Resolution (Adzuna)
-    raw_candidates.extend(fetch_adzuna_jobs())
+    # 1. Push to Google Sheet Webhook
+    sheet_url = os.environ.get("GSHEET_WEBAPP_URL")
+    secret_token = os.environ.get("GSHEET_TOKEN", "mc_secure_token_78701")
+    appended_count = 0
 
-    # 2. Curated Direct ATS Feeds
-    for feed in DISCOVERY_FEEDS:
-        f_type = feed["type"]
-        if f_type == "greenhouse":
-            raw_candidates.extend(fetch_greenhouse(feed["board_token"], feed["source_label"], feed["default_location"]))
-        elif f_type == "lever":
-            raw_candidates.extend(fetch_lever(feed["site"], feed["source_label"], feed["default_location"]))
-
-    print(f"Candidate filtering pool: {len(raw_candidates)} matching keyword roles found.")
-
-    curated_batch = []
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    for raw in raw_candidates:
-        eval_result = evaluate_job(
-            raw["title"], raw["description"], raw["workplace_type"], raw["location"], raw["salary"]
-        )
-
-        if not eval_result["passed"]:
-            continue
-
-        job_record = {
-            "id": f"job_{compute_content_fingerprint(raw['title'] + raw['description'])}",
-            "title": raw["title"],
-            "company": raw["company"],
-            "url": raw["url"],
-            "description": raw["description"],
-            "pipeline_state": {
-                "status": eval_result["status"],
-                "priority": "High" if eval_result["status"] == "Fast-Track" else "Standard",
-                "date_posted": today_str,
-                "date_fed": today_str,
-                "source": raw["source"]
-            },
-            "details": {
-                "workplace_type": raw["workplace_type"],
-                "location": raw["location"],
-                "salary": eval_result.get("salary", raw["salary"])
-            },
-            "evaluation": {
-                "match_score": eval_result["score"],
-                "notes": eval_result["notes"]
-            }
-        }
-        curated_batch.append(job_record)
-
-    print(f"Discovery complete. Evaluated {len(raw_candidates)} postings -> {len(curated_batch)} curated.")
-
-    # Ingest to Google Sheet Webhook via POST
-    ingested_count = 0
-    if curated_batch:
+    if sheet_url and curated_jobs:
         try:
             payload = {
-                "token": gsheet_token,
-                "jobs": curated_batch
+                "token": secret_token,
+                "jobs": curated_jobs
             }
-            res = requests.post(gsheet_url, json=payload, timeout=40)
-            res_data = res.json()
-            if res_data.get("status") == "success":
-                ingested_count = res_data.get("appended", 0)
-                print(f"Successfully posted to Sheet. Appended: {ingested_count} rows.")
+            res = requests.post(sheet_url, json=payload, timeout=25)
+            if res.status_code == 200:
+                resp_json = res.json()
+                appended_count = resp_json.get("appended", len(curated_jobs))
+                print(f"Successfully pushed {appended_count} new postings to Google Sheet.")
             else:
-                print(f"Google Sheet response: {res_data.get('message')}")
+                print(f"Sheet push returned status {res.status_code}: {res.text}")
         except Exception as e:
-            print(f"Failed to post to Google Apps Script: {e}")
+            print(f"Error posting to Google Sheet Webhook: {e}")
+    else:
+        print("No new jobs to append or GSHEET_WEBAPP_URL not configured.")
 
-    # Trigger Mobile Notification via ntfy.sh
+    # 2. Push Notification via ntfy
+    ntfy_topic = os.environ.get("NTFY_TOPIC")
     if ntfy_topic:
-        if ingested_count > 0:
-            msg = f"🎯 Mission Control: The latest push curated {ingested_count} new postings."
-            tags = "dart,briefcase"
+        if appended_count > 0:
+            msg = f"🎯 Mission Control: The latest push curated {appended_count} new posting(s)."
+            tags = "briefcase,tada"
             priority = "high"
         else:
-            msg = "🎯 Mission Control: Sweep completed. Verified feeds up to date."
-            tags = "check"
+            msg = "🎯 Mission Control: Sweep completed. Feeds are up to date."
+            tags = "white_check_mark"
             priority = "low"
 
         try:
@@ -619,16 +306,15 @@ def main():
                 f"https://ntfy.sh/{ntfy_topic}",
                 data=msg.encode("utf-8"),
                 headers={
-                    "Title": "Mission Control Pipeline",
+                    "Title": "Mission Control Update",
                     "Priority": priority,
                     "Tags": tags
                 },
                 timeout=10
             )
-            print(f"ntfy alert sent to topic: {ntfy_topic}")
+            print("Push alert sent successfully to mobile device.")
         except Exception as e:
-            print(f"ntfy push notification failed: {e}")
-
+            print(f"Failed to deliver mobile notification: {e}")
 
 if __name__ == "__main__":
     main()
