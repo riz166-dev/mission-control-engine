@@ -209,21 +209,28 @@ def fetch_adzuna_jobs() -> list:
     
     # Dual query setup: Local Austin Metro + Nationwide Remote
     queries = [
-        {"what": "Events OR Experiential OR Event Production", "where": "Austin, TX", "distance": "25", "is_remote": False},
-        {"what": "Director of Events OR Event Operations OR Experiential Manager", "where": "Remote", "distance": "0", "is_remote": True}
+        {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
+        {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
+        {"what": "Director of Events", "where": "Austin, TX", "dist": "25"},
+        {"what": "Director of Events Remote", "where": None, "dist": None},
+        {"what": "Experiential Producer Remote", "where": None, "dist": None}
     ]
 
     for q in queries:
-        url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
-        params = {
-            "app_id": app_id,
-            "app_key": app_key,
-            "what": q["what"],
-            "where": q["where"],
-            "distance": q["distance"],
-            "results_per_page": 30,
-            "content-type": "application/json"
-        }
+        try:
+            url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
+            params = {
+                "app_id": app_id,
+                "app_key": app_key,
+                "results_per_page": 20,
+                "what": q["what"],
+                "content-type": "application/json"
+            }
+            if q["where"]:
+                params["where"] = q["where"]
+                params["distance"] = q["dist"]
+
+            res = requests.get(url, params=params, timeout=12)
 
         try:
             res = requests.get(url, params=params, timeout=15)
