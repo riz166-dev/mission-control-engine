@@ -1,213 +1,210 @@
+#!/usr/bin/env python3
+"""
+Mission Control Autonomous Discovery & Ingestion Engine
+Crawls target feeds, filters against candidate profile, computes match scores,
+posts clean JSON to Google Sheet doPost endpoint, and triggers mobile push alert.
+"""
+
 import os
 import re
 import sys
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 
 # ---------------------------------------------------------
-# 1. CANDIDATE PROFILE & GATE DEFINITIONS
+# Candidate Profile Calibration Rules
 # ---------------------------------------------------------
-AUSTIN_KEYWORDS = ["austin", "78701", "78758", "78735", "78752", "78704", "del valle", "travis county"]
+SALARY_STRICT_FLOOR = 75000
+SALARY_TARGET_MIN = 90000
 
-# Tier A: Seniority / Level
-SENIORITY_LEVELS = [
-    "director", "manager", "lead", "head", "producer", 
-    "vp", "vice president", "chief", "principal", "specialist"
+HARD_DISQUALIFIERS = [
+    r"\bbusiness development\b",
+    r"\bclient acquisition\b",
+    r"\bticket sales\b",
+    r"\bsales quotas?\b",
+    r"\btrade show booth\b",
+    r"\bexhibit hall\b",
+    r"\bdrayage\b",
+    r"\bcommission only\b",
+    r"\bcold call(ing)?\b",
+    r"\bkubernetes\b",
+    r"\bci/cd pipelines?\b",
+    r"\bb2b enterprise marketing\b",
+    r"\benterprise saas marketing\b",
+    r"\bsaas marketing\b"
 ]
 
-# Tier B: Core Functional Discipline
-EVENT_DOMAINS = [
-    "event", "events", "experiential", "experience", 
-    "experiences", "production", "festival", "gathering", "entertainment"
+TITLE_EXCLUSIONS = [
+    r"\bsoftware engineer\b",
+    r"\bfull[- ]stack\b",
+    r"\bbackend\b",
+    r"\bfrontend\b",
+    r"\bdevops\b",
+    r"\bdata engineer\b",
+    r"\btechnical architect\b",
+    r"\bqa engineer\b",
+    r"\bit director\b"
 ]
 
-# Hard Functional Blockers in Title (Instant Rejection)
-TITLE_BLOCKERS = [
-    "product", "hr", "human resources", "sales", "account executive",
-    "business development", "security", "drayage", "booth", "social media",
-    "it operations", "warehouse", "culinary", "restaurant", "catering sales",
-    "pharma", "speaker bureau"
+POSITIVE_MULTIPLIERS = [
+    "run-of-show", "stadium", "festival", "mass gathering", "permitting",
+    "apd", "afd", r"\bems\b", "clickup", "asana", "figma", "canva", "pmp",
+    "vendor procurement", "experiential", "activation", "operations", "production"
 ]
 
-# Hard Disqualifiers in Body
-EXCLUDED_INDUSTRIES = ["crypto", "web3", "gambling", "casino", "sports betting"]
-EXCLUDED_DUTIES = [
-    "ticket sales", "cold call", "cold outreach", "business development manager",
-    "booth sales", "drayage", "exhibit sales", "sponsorship sales", 
-    "client acquisition quotas", "exhibitor freight"
+# Verified Public Feeds / Direct ATS Endpoints
+DISCOVERY_FEEDS = [
+    {
+        "type": "lever",
+        "site": "twooakventures",
+        "source_label": "Two Oak / Austin FC (Q2 Stadium)",
+        "default_location": "Austin, TX (Q2 Stadium)"
+    },
+    {
+        "type": "greenhouse",
+        "board_token": "c3presents",
+        "source_label": "Greenhouse (C3 Presents / Live Nation)",
+        "default_location": "Austin, TX"
+    },
+    {
+        "type": "greenhouse",
+        "board_token": "yeti",
+        "source_label": "Greenhouse (YETI Experiential)",
+        "default_location": "Austin, TX 78735"
+    }
 ]
 
-CREATIVE_TOOLS = ["canva", "figma", "clickup", "asana", "airtable"]
 
-# ---------------------------------------------------------
-# 2. BOOLEAN & TEXT EVALUATION LOGIC
-# ---------------------------------------------------------
-def title_clears_level_and_function_gate(title: str) -> bool:
-    """
-    Evaluates whether a job title satisfies the Level AND Function requirement
-    without triggering functional disqualifiers.
-    """
-    clean_title = title.lower()
+def clean_url(url: str) -> str:
+    """Strip UTM parameters and syndication tracking tokens."""
+    if not url:
+        return ""
+    clean = re.sub(r"([?&])(utm_[^&]+|ref=[^&]+|gh_src=[^&]+|lever-source=[^&]+)", "", url)
+    return clean.rstrip("?&")
 
-    # Step 1: Immediate ejection if title contains hard blockers
-    for blocker in TITLE_BLOCKERS:
-        if re.search(r'\b' + re.escape(blocker) + r'\b', clean_title):
-            return False
 
-    # Step 2: Check for Seniority Level match
-    has_level = any(re.search(r'\b' + re.escape(lvl) + r'\b', clean_title) for lvl in SENIORITY_LEVELS)
+def compute_content_fingerprint(text: str) -> str:
+    """180+ character normalized qualification paragraph fingerprint."""
+    normalized = re.sub(r"\s+", " ", text.lower().strip())
+    seed = normalized[:220] if len(normalized) >= 180 else normalized
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
-    # Step 3: Check for Core Event Domain match
-    has_event_domain = any(re.search(r'\b' + re.escape(dom) + r'\b', clean_title) for dom in EVENT_DOMAINS)
 
-    # Step 4: Strict Operations Rule (Operations must be paired with Events/Production)
-    if "operation" in clean_title or "operations" in clean_title:
-        return has_level and has_event_domain
-
-    return has_level and has_event_domain
-
-def extract_salary_range(text: str):
-    matches = re.findall(r'\$(\d{2,3}),?(\d{3})?', text)
-    if not matches:
-        return None, None
-    salaries = []
-    for m in matches:
-        val_str = m[0] + (m[1] if m[1] else "000")
-        try:
-            salaries.append(int(val_str))
-        except ValueError:
-            continue
-    if salaries:
-        return min(salaries), max(salaries)
-    return None, None
-
-def evaluate_job(raw_job: dict) -> dict:
-    title = raw_job.get("title", "")
-    description = raw_job.get("description", "")
-    location = raw_job.get("location", "")
-    full_text = f"{title} {description} {location}".lower()
-
-    # 1. Title Gate (Seniority x Function Matrix)
-    if not title_clears_level_and_function_gate(title):
-        return None
-
-    # 2. Hard Disqualifiers: Repost Check
-    if "reposted" in full_text or raw_job.get("is_repost", False):
-        return None
-
-    # 3. Hard Disqualifiers: Excluded Industries
-    for ind in EXCLUDED_INDUSTRIES:
-        if ind in full_text:
-            return None
-
-    # 4. Hard Disqualifiers: Sales Quotas & Trade Show Drayage
-    for duty in EXCLUDED_DUTIES:
-        if duty in full_text:
-            return None
-
-    # 5. Location Gate: Austin Metro vs US Remote
-    is_remote = "remote" in full_text or "remote" in location.lower() or raw_job.get("is_remote", False)
-    is_austin = any(k in location.lower() or k in full_text for k in AUSTIN_KEYWORDS)
-
-    if not is_remote and not is_austin:
-        return None  # Rejects non-Austin on-site/hybrid
-
-    # 6. Strict Compensation Floor
-    sal_min = raw_job.get("salary_min")
-    sal_max = raw_job.get("salary_max")
+def parse_salary(salary_str: str) -> tuple[int, int]:
+    """Extract minimum and maximum compensation numbers from raw text."""
+    if not salary_str:
+        return (0, 0)
     
-    if sal_min is None and sal_max is None:
-        text_min, text_max = extract_salary_range(full_text)
-        sal_min, sal_max = text_min, text_max
+    # Check for hourly rates (e.g. $55/hr - $60/hr) and convert to annual (x 2080 hrs)
+    hourly_match = re.findall(r"\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:/|\bper\b)?\s*(?:hr|hour)", salary_str.lower())
+    if hourly_match:
+        rates = [float(r) * 2080 for r in hourly_match]
+        return (int(min(rates)), int(max(rates)))
 
-    if sal_max and sal_max < 75000:
-        return None  # Under $75k floor
+    nums = re.findall(r"\$([0-9]{1,3}(?:,[0-9]{3})*)", salary_str)
+    if not nums:
+        return (0, 0)
+    int_nums = [int(n.replace(",", "")) for n in nums]
+    return (min(int_nums), max(int_nums))
 
-    # 7. Scoring Engine & Operational Categorization
-    match_score = 75
+
+def evaluate_job(title: str, description: str, workplace_type: str, location: str, salary_str: str) -> dict:
+    """Applies candidate calibration gates, match scoring, and categorization."""
+    title_lower = title.lower()
+    full_text = f"{title}\n{description}\n{location}".lower()
+
+    # Gate 1: Title Disqualifiers
+    for pattern in TITLE_EXCLUSIONS:
+        if re.search(pattern, title_lower):
+            return {
+                "passed": False,
+                "score": 35,
+                "status": "Passed",
+                "notes": [f"Filtered: Excluded technical role pattern '{pattern}'."]
+            }
+
+    # Gate 2: Hard Disqualifiers (Sales, Booths, Drayage)
+    for pattern in HARD_DISQUALIFIERS:
+        if re.search(pattern, full_text):
+            return {
+                "passed": False,
+                "score": 40,
+                "status": "Passed",
+                "notes": [f"Disqualified by dealbreaker: matches exclusion '{pattern}'."]
+            }
+
+    # Gate 3: Short-term Contract Filter (< 1 Year)
+    if "contract" in full_text or "temporary" in full_text:
+        short_term_match = re.search(r"\b(1|2|3|4|5|6|7|8|9|10|11)\s*(?:-|to)?\s*(?:month|mo)s?\b", full_text)
+        if short_term_match:
+            return {
+                "passed": False,
+                "score": 40,
+                "status": "Passed",
+                "notes": ["Filtered: Contract duration under 1 year walk-away boundary."]
+            }
+
+    # Gate 4: Salary Evaluation
+    sal_min, sal_max = parse_salary(salary_str)
+    if sal_max > 0 and sal_max < SALARY_STRICT_FLOOR:
+        return {
+            "passed": False,
+            "score": 45,
+            "status": "Passed",
+            "notes": [f"Salary ${sal_max:,} below strict ${SALARY_STRICT_FLOOR:,} walk-away floor."]
+        }
+
+    # Gate 5: Score Calculation
+    score = 75
     notes = []
 
-    if any(k in full_text for k in ["operations", "logistics", "production", "run of show", "budget"]):
-        match_score += 10
-        notes.append("Operational Leadership: High alignment with live production & operational execution.")
+    multiplier_hits = [m for m in POSITIVE_MULTIPLIERS if re.search(m, full_text)]
+    score += min(len(multiplier_hits) * 3, 20)
+    if multiplier_hits:
+        clean_hits = [m.replace(r"\b", "") for m in multiplier_hits[:3]]
+        notes.append(f"Operational multipliers matched: {', '.join(clean_hits)}.")
 
-    found_tools = [t.title() for t in CREATIVE_TOOLS if t in full_text]
-    if found_tools:
-        match_score += 10
-        notes.append(f"Visual / Workflow Synergies: Mentions {', '.join(found_tools)}.")
+    # Location & Workplace Routing
+    is_remote = "remote" in workplace_type.lower() or "remote" in location.lower()
+    is_austin = any(marker in location.lower() for marker in ["austin", "787", "del valle", "round rock", "travis"])
+    is_senior_title = any(re.search(pat, title_lower) for pat in [r"\bdirector\b", r"\bhead\b", r"\bexecutive\b", r"\bsenior producer\b", r"\bsr\. producer\b"])
 
-    # Workplace Type & Fast-Track Routing
     if is_remote:
-        workplace_type = "Remote"
         status = "Parked"
-        notes.append("Remote Policy: Auto-parked for team structure audit and travel verification.")
+        notes.append("Auto-parked for remote audit: verify leadership scope vs. isolated IC churn.")
     elif is_austin:
-        workplace_type = "Hybrid" if "hybrid" in full_text else "On-site"
-        if match_score >= 85:
+        # Route Austin leadership to Fast-Track, rest to Inbox
+        if (is_senior_title and score >= 75) or score >= 84:
             status = "Fast-Track"
-            notes.append("Austin Anchor: Strong local operational fit within target radius.")
+            notes.append("Local Austin operational fit meeting Fast-Track criteria.")
         else:
             status = "Inbox"
+            notes.append("Local Austin posting placed in Inbox for candidate review.")
     else:
-        workplace_type = "On-site"
-        status = "Inbox"
+        status = "Parked"
+        notes.append(f"Regional/National scope ({location}) staged for geographic review.")
 
-    # Format salary string
-    if sal_min and sal_max:
-        salary_str = f"${int(sal_min):,} - ${int(sal_max):,}"
-    elif sal_min:
-        salary_str = f"${int(sal_min):,}+"
+    if salary_str and salary_str != "Unlisted":
+        notes.append(f"Compensation verified: {salary_str}.")
     else:
-        salary_str = "Unlisted (Estimated based on scope)"
-
-    # Stable deterministic ID
-    unique_key = raw_job.get("url") or f"{title}_{raw_job.get('company')}"
-    job_hash = hashlib.md5(unique_key.encode("utf-8")).hexdigest()[:6]
+        notes.append("Salary unlisted; estimated according to executive scale.")
 
     return {
-        "id": f"job_{job_hash}",
-        "title": title.strip(),
-        "company": raw_job.get("company", "Verified Employer").strip(),
-        "url": raw_job.get("url", ""),
-        "description": description.strip(),
-        "pipeline_state": {
-            "status": status,
-            "priority": "High" if status == "Fast-Track" else "Standard",
-            "date_posted": raw_job.get("date_posted", datetime.now().strftime("%Y-%m-%d")),
-            "date_fed": datetime.now().strftime("%Y-%m-%d"),
-            "source": raw_job.get("source", "Adzuna Sweep")
-        },
-        "details": {
-            "workplace_type": workplace_type,
-            "location": location.strip() if location else "Austin, TX",
-            "salary": salary_str
-        },
-        "evaluation": {
-            "match_score": min(match_score, 98),
-            "notes": notes
-        }
+        "passed": True,
+        "score": min(score, 98),
+        "status": status,
+        "notes": notes
     }
 
-# ---------------------------------------------------------
-# 3. MARKET SWEEPER (Adzuna Austin + US Remote Queries)
-# ---------------------------------------------------------
-def fetch_adzuna_jobs() -> list:
-    """
-    Sweeps Adzuna across both Austin Metro (25-mile radius) and US Remote
-    to capture high-conviction events, operations, and experience roles.
-    """
-    app_id = os.environ.get("ADZUNA_APP_ID")
-    app_key = os.environ.get("ADZUNA_APP_KEY")
-    
+
+def fetch_adzuna_jobs(app_id: str, app_key: str) -> list:
+    """Fetch roles via Adzuna API, avoiding HTTP 400 on remote queries."""
     if not app_id or not app_key:
-        print("Notice: Adzuna credentials not found. Skipping aggregator sweep.")
+        print("[Adzuna] Credentials missing in environment, skipping.")
         return []
 
-    discovered = []
-    
-    # Dual query setup: Local Austin Metro + Nationwide Remote
     queries = [
         {"what": "Event Operations Producer", "where": "Austin, TX", "dist": "25"},
         {"what": "Experiential Production Manager", "where": "Austin, TX", "dist": "25"},
@@ -216,6 +213,7 @@ def fetch_adzuna_jobs() -> list:
         {"what": "Experiential Producer Remote", "where": None, "dist": None}
     ]
 
+    jobs = []
     for q in queries:
         try:
             url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
@@ -231,89 +229,185 @@ def fetch_adzuna_jobs() -> list:
                 params["distance"] = q["dist"]
 
             res = requests.get(url, params=params, timeout=12)
-
-        try:
-            res = requests.get(url, params=params, timeout=15)
             if res.status_code == 200:
-                data = res.json()
-                for item in data.get("results", []):
-                    discovered.append({
+                results = res.json().get("results", [])
+                label = f"'{q['what']}'" + (f" in {q['where']}" if q["where"] else " [Remote]")
+                print(f"[Adzuna: {label}] Harvested {len(results)} listings.")
+                for item in results:
+                    loc_name = item.get("location", {}).get("display_name", "Austin, TX")
+                    salary_min = item.get("salary_min")
+                    salary_max = item.get("salary_max")
+                    sal_str = f"${int(salary_min):,} - ${int(salary_max):,}" if salary_min and salary_max else "Unlisted"
+                    jobs.append({
                         "title": item.get("title", ""),
-                        "company": item.get("company", {}).get("display_name", "Verified Employer"),
-                        "url": item.get("redirect_url", ""),
+                        "company": item.get("company", {}).get("display_name", "Direct Employer"),
+                        "url": clean_url(item.get("redirect_url")),
                         "description": item.get("description", ""),
-                        "location": item.get("location", {}).get("display_name", q["where"]),
-                        "salary_min": item.get("salary_min"),
-                        "salary_max": item.get("salary_max"),
-                        "date_posted": (item.get("created", "")[:10]) or datetime.now().strftime("%Y-%m-%d"),
-                        "source": "Adzuna Sweep",
-                        "is_remote": q["is_remote"]
+                        "workplace_type": "Remote" if not q["where"] or "remote" in loc_name.lower() else "Hybrid",
+                        "location": "Remote (US)" if not q["where"] else loc_name,
+                        "salary": sal_str,
+                        "source": "Adzuna Aggregator"
                     })
             else:
-                print(f"Notice: Adzuna returned status {res.status_code} for query '{q['where']}'")
+                print(f"[Adzuna] Status {res.status_code} for query '{q['what']}'")
         except Exception as e:
-            print(f"Notice: Error querying Adzuna: {e}")
+            print(f"[Adzuna] Connection error for '{q['what']}': {e}")
 
-    return discovered
+    return jobs
 
-# ---------------------------------------------------------
-# 4. RUNTIME PIPELINE DISCOVERY, SYNC & NOTIFICATION
-# ---------------------------------------------------------
+
+def fetch_greenhouse(board_token: str, source_label: str, default_location: str) -> list:
+    url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
+    jobs = []
+    try:
+        res = requests.get(url, timeout=12)
+        if res.status_code == 200:
+            for item in res.json().get("jobs", []):
+                title = item.get("title", "")
+                if any(kw in title.lower() for kw in ["event", "operation", "producer", "production", "creative", "program"]):
+                    loc = item.get("location", {}).get("name", default_location)
+                    desc = re.sub(r"<[^>]+>", " ", item.get("content", "")).strip()
+                    jobs.append({
+                        "title": title,
+                        "company": board_token.capitalize(),
+                        "url": clean_url(item.get("absolute_url")),
+                        "description": desc[:2500],
+                        "workplace_type": "Remote" if "remote" in loc.lower() else "Hybrid",
+                        "location": loc,
+                        "salary": "Unlisted",
+                        "source": source_label
+                    })
+    except Exception as e:
+        print(f"Greenhouse fetch error ({board_token}): {e}")
+    return jobs
+
+
+def fetch_lever(site: str, source_label: str, default_location: str) -> list:
+    url = f"https://api.lever.co/v0/postings/{site}?mode=json"
+    jobs = []
+    try:
+        res = requests.get(url, timeout=12)
+        if res.status_code == 200:
+            for item in res.json():
+                title = item.get("text", "")
+                if any(kw in title.lower() for kw in ["event", "operation", "producer", "director", "creative"]):
+                    loc = item.get("categories", {}).get("location", default_location)
+                    jobs.append({
+                        "title": title,
+                        "company": site.capitalize(),
+                        "url": clean_url(item.get("hostedUrl")),
+                        "description": item.get("descriptionPlain", "")[:2500],
+                        "workplace_type": "Remote" if "remote" in loc.lower() else "On-site",
+                        "location": loc,
+                        "salary": "Unlisted",
+                        "source": source_label
+                    })
+    except Exception as e:
+        print(f"Lever fetch error ({site}): {e}")
+    return jobs
+
+
 def main():
+    gsheet_url = os.environ.get("GSHEET_WEBAPP_URL")
+    gsheet_token = os.environ.get("GSHEET_TOKEN", "mc_secure_token_78701")
+    ntfy_topic = os.environ.get("NTFY_TOPIC")
+    adzuna_id = os.environ.get("ADZUNA_APP_ID")
+    adzuna_key = os.environ.get("ADZUNA_APP_KEY")
+
+    if not gsheet_url:
+        print("Error: GSHEET_WEBAPP_URL environment variable is missing.")
+        sys.exit(1)
+
     print("Starting Mission Control Autonomous Discovery Sweep...")
-    
-    raw_listings = fetch_adzuna_jobs()
-    print(f"Harvested {len(raw_listings)} raw listings from broad sweep.")
+    raw_candidates = []
 
-    curated_jobs = []
-    for raw in raw_listings:
-        evaluated = evaluate_job(raw)
-        if evaluated:
-            curated_jobs.append(evaluated)
+    # 1. Broad Market: Adzuna Engine
+    raw_candidates.extend(fetch_adzuna_jobs(adzuna_id, adzuna_key))
 
-    print(f"Filtered down to {len(curated_jobs)} matching role(s).")
+    # 2. Targeted Feeds
+    for feed in DISCOVERY_FEEDS:
+        if feed["type"] == "greenhouse":
+            raw_candidates.extend(fetch_greenhouse(feed["board_token"], feed["source_label"], feed["default_location"]))
+        elif feed["type"] == "lever":
+            raw_candidates.extend(fetch_lever(feed["site"], feed["source_label"], feed["default_location"]))
 
-    # 1. Push to Google Sheet Webhook
-    sheet_url = os.environ.get("GSHEET_WEBAPP_URL")
-    secret_token = os.environ.get("GSHEET_TOKEN", "mc_secure_token_78701")
-    appended_count = 0
+    print(f"Harvested {len(raw_candidates)} raw listings from broad sweep.")
 
-    if sheet_url and curated_jobs:
+    curated_batch = []
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    for raw in raw_candidates:
+        eval_result = evaluate_job(
+            raw["title"], raw["description"], raw["workplace_type"], raw["location"], raw["salary"]
+        )
+
+        if not eval_result["passed"]:
+            continue
+
+        job_record = {
+            "id": f"job_{compute_content_fingerprint(raw['title'] + raw['description'])}",
+            "title": raw["title"],
+            "company": raw["company"],
+            "url": raw["url"],
+            "description": raw["description"],
+            "pipeline_state": {
+                "status": eval_result["status"],
+                "priority": "High" if eval_result["status"] == "Fast-Track" else "Standard",
+                "date_posted": today_str,
+                "date_fed": today_str,
+                "source": raw["source"]
+            },
+            "details": {
+                "workplace_type": raw["workplace_type"],
+                "location": raw["location"],
+                "salary": raw["salary"]
+            },
+            "evaluation": {
+                "match_score": eval_result["score"],
+                "notes": eval_result["notes"]
+            }
+        }
+        curated_batch.append(job_record)
+
+    print(f"Filtered down to {len(curated_batch)} matching role(s).")
+
+    # Ingest to Google Sheet Webhook
+    ingested_count = 0
+    if curated_batch:
         try:
             payload = {
-                "token": secret_token,
-                "jobs": curated_jobs
+                "token": gsheet_token,
+                "jobs": curated_batch
             }
-            res = requests.post(sheet_url, json=payload, timeout=25)
-            if res.status_code == 200:
-                resp_json = res.json()
-                appended_count = resp_json.get("appended", len(curated_jobs))
-                print(f"Successfully pushed {appended_count} new postings to Google Sheet.")
+            res = requests.post(gsheet_url, json=payload, timeout=30)
+            res_data = res.json()
+            if res_data.get("status") == "success":
+                ingested_count = res_data.get("appended", 0)
+                print(f"Successfully posted to Sheet. Appended: {ingested_count} rows.")
             else:
-                print(f"Sheet push returned status {res.status_code}: {res.text}")
+                print(f"Google Sheet response: {res_data.get('message')}")
         except Exception as e:
-            print(f"Error posting to Google Sheet Webhook: {e}")
+            print(f"Failed to post to Google Apps Script: {e}")
     else:
         print("No new jobs to append or GSHEET_WEBAPP_URL not configured.")
 
-    # 2. Push Notification via ntfy
-    ntfy_topic = os.environ.get("NTFY_TOPIC")
+    # Trigger Mobile Notification via ntfy.sh
     if ntfy_topic:
-        if appended_count > 0:
-            msg = f"🎯 Mission Control: The latest push curated {appended_count} new posting(s)."
-            tags = "briefcase,tada"
+        if ingested_count > 0:
+            msg = f"🎯 Mission Control: Curated {ingested_count} new postings."
             priority = "high"
+            tags = "dart,briefcase"
         else:
-            msg = "🎯 Mission Control: Sweep completed. Feeds are up to date."
-            tags = "white_check_mark"
+            msg = "🎯 Mission Control: Sweep completed. Feeds up to date."
             priority = "low"
+            tags = "check"
 
         try:
             requests.post(
                 f"https://ntfy.sh/{ntfy_topic}",
                 data=msg.encode("utf-8"),
                 headers={
-                    "Title": "Mission Control Update",
+                    "Title": "Mission Control Pipeline",
                     "Priority": priority,
                     "Tags": tags
                 },
@@ -321,7 +415,8 @@ def main():
             )
             print("Push alert sent successfully to mobile device.")
         except Exception as e:
-            print(f"Failed to deliver mobile notification: {e}")
+            print(f"ntfy alert failed: {e}")
+
 
 if __name__ == "__main__":
     main()
