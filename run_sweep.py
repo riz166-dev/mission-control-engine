@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Mission Control Autonomous Discovery & Ingestion Engine
-Crawls broad-market aggregators (Adzuna across Pages 1-3), open full-text feeds,
-and direct ATS endpoints (Greenhouse, Lever).
-Enforces Curated Live Event & Experiential Domains, Dealbreaker Negative Gates,
+Multi-source pipeline: Paginated Adzuna (Pages 1-3), Himalayas Full-Text API,
+Jobicy Remote Ops API, We Work Remotely RSS, and Direct Corporate ATS Endpoints.
+Enforces Curated Event & Experiential Domains, Dealbreakers (Observations 01-13),
 Greater Austin Metro expansion, contract duration checks (>= 1 yr),
-and converts hourly compensation to annual equivalents.
-Pushes authenticated JSON to Google Sheet Webhook + sends mobile push alerts.
+and hourly-to-annual compensation normalization (x 2080).
+Pushes authenticated JSON to Google Sheet Webhook + sends ntfy mobile alerts.
 """
 
 import os
@@ -15,6 +15,7 @@ import sys
 import json
 import html
 import hashlib
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 import requests
 
@@ -26,67 +27,38 @@ SALARY_TARGET_MIN = 90000
 
 # Greater Austin Metro & Submarket Keywords
 AUSTIN_METRO_KEYWORDS = [
-    # Core Austin & Urban Zip Codes
     "austin", "78701", "78702", "78704", "78735", "78752", "78758",
     "travis county", "del valle",
-    
-    # North Metro
     "round rock", "cedar park", "pflugerville", "georgetown", "williamson county",
-    
-    # South & Southwest Metro
     "buda", "kyle", "san marcos", "dripping springs", "hays county",
-    
-    # West Metro
     "bee cave", "lakeway"
 ]
 
 # Curated Positive Functional Domains (No mandatory seniority title required)
 EVENT_DOMAINS = [
-    # Core Direct Experiential & Production
     "event", "events", "experiential", "experience", "experiences",
     "production", "festival", "gathering", "entertainment",
-    
-    # Brand Field Activations (Fixed/Local scope)
     "activation", "activations",
-    
-    # Facilities & Stadiums
     "venue", "venues", "stadium", "arena", "show production",
-    
-    # Operational & Guest Delivery
     "creative operations", "live operations", "guest experience", "fan experience"
 ]
 
-# LAYER 1: TITLE BLOCKERS (Instant Rejection at Title Level)
+# LAYER 1: TITLE BLOCKERS (Instant Rejection)
 TITLE_BLOCKERS = [
-    # Product Management
     r"\bproduct manager\b", r"\bhead of product\b", r"\bproduct lead\b", r"\bproduct owner\b",
-    
-    # HR & Internal People Ops
     r"\bhuman resources\b", r"\bhr\b", r"\btalent acquisition\b", r"\brecruiter\b", r"\bpeople operations\b",
-    
-    # Sales / Business Development
     r"\bsales\b", r"\baccount executive\b", r"\bbusiness development\b", r"\bbdr\b", r"\bsdr\b",
-    
-    # Executive Administrative
     r"\bchief of staff\b",
-    
-    # Security Operations
     r"\bsecurity\b", r"\bguard\b", r"\bcybersecurity\b",
-    
-    # Technical AV / Engineering Exclusions
     r"\btechnical director\b", r"\baudio engineer\b", r"\blighting designer\b", 
     r"\bav technician\b", r"\bbroadcast engineering\b", r"\bsoftware engineer\b", 
     r"\bfull[- ]stack\b", r"\bdevops\b", r"\bdata engineer\b", r"\bsolutions architect\b",
-    
-    # Non-Target Back-Office / Trades / Food
     r"\bdrayage\b", r"\bwarehouse\b", r"\bculinary\b", r"\brestaurant\b", 
     r"\bcatering sales\b", r"\bf&b\b", r"\bpharma\b", r"\bspeaker bureau\b",
-    
-    # High-Travel / Conventions Excluded
     r"\btour\b", r"\broadshow\b", r"\bsummit\b", r"\bconference\b", r"\bsymposium\b"
 ]
 
-# LAYER 2: BODY TEXT DEALBREAKERS (Deep Description Scan)
+# LAYER 2: BODY TEXT DEALBREAKERS (Observations 01-13)
 BODY_DEALBREAKERS = [
     # B2B Enterprise SaaS & Demand Gen
     r"\bb2b (enterprise )?saas\b",
@@ -209,7 +181,7 @@ DISCOVERY_FEEDS = [
 ]
 
 # ---------------------------------------------------------
-# 2. STRING CLEANING & PARSING UTILITIES
+# 2. STRING CLEANING & UTILITIES
 # ---------------------------------------------------------
 def clean_url(url: str) -> str:
     """Strip tracking and syndication query tokens."""
@@ -249,7 +221,7 @@ def parse_salary(salary_str: str) -> tuple[int, int]:
     if not salary_str:
         return (0, 0)
 
-    # Check for hourly rates (e.g. $55/hr - $59/hr)
+    # Hourly rates ($55/hr - $59/hr)
     if "/hr" in salary_str.lower() or "hour" in salary_str.lower():
         hourly_matches = re.findall(r"\$([0-9]{2,3}(?:\.[0-9]{2})?)", salary_str)
         if hourly_matches:
@@ -289,26 +261,19 @@ def scrub_description_for_salary(text: str) -> str:
     return "Unlisted"
 
 # ---------------------------------------------------------
-# 3. EVALUATION GATES & MATCH ENGINE
+# 3. EVALUATION GATES
 # ---------------------------------------------------------
 def title_clears_domain_gate(title: str) -> bool:
-    """
-    Evaluates whether a job title satisfies the Event Domain requirement
-    without triggering functional blockers. No mandatory seniority titles required.
-    """
+    """Evaluates whether a title satisfies the Event Domain without hitting blockers."""
     clean_title = title.lower()
-
-    # Step 1: Reject if title hits any title blockers
     for blocker in TITLE_BLOCKERS:
         if re.search(blocker, clean_title):
             return False
-
-    # Step 2: Ensure presence of core event/experiential/production domains
     return any(re.search(r'\b' + re.escape(dom) + r'\b', clean_title) for dom in EVENT_DOMAINS)
 
 
 def check_contract_eligibility(full_text: str) -> tuple[bool, str]:
-    """Allows contracts >= 1 year; rejects short-term assignments."""
+    """Allows contracts >= 1 year; rejects short-term gigs."""
     for pat in SHORT_TERM_CONTRACT_PATTERNS:
         if re.search(pat, full_text):
             return False, f"Disqualified: Contract duration under 12-month minimum ({pat})."
@@ -330,7 +295,7 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
             "notes": ["Excluded: Title failed functional domain gate or matched title blocker."]
         }
 
-    # Gate 2: Body Text Dealbreakers (Comprehensive Negative Scan)
+    # Gate 2: Body Text Dealbreakers (Observations 01-13)
     for dealbreaker in BODY_DEALBREAKERS:
         if re.search(dealbreaker, full_text):
             return {
@@ -391,7 +356,6 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
     if matched_multipliers:
         notes.append(f"Profile multipliers matched: {', '.join(matched_multipliers[:3])}.")
 
-    # Leadership title presence for scoring boost
     is_senior_title = any(re.search(r'\b' + re.escape(lvl) + r'\b', clean_title) 
                           for lvl in ["director", "head", "lead", "producer", "manager", "chief", "vp"])
 
@@ -423,7 +387,7 @@ def evaluate_job(title: str, description: str, workplace_type: str, location: st
     }
 
 # ---------------------------------------------------------
-# 4. DATA SOURCING FEEDS (PAGINATED ADZUNA + FULL-TEXT OPEN FEEDS + DIRECT ATS)
+# 4. MULTI-SOURCE SOURCING FEEDS
 # ---------------------------------------------------------
 def fetch_adzuna_jobs() -> list:
     """Queries Adzuna API across Pages 1-3 for Greater Austin and US Remote."""
@@ -435,15 +399,11 @@ def fetch_adzuna_jobs() -> list:
         return []
 
     jobs = []
-
     queries = [
-        # Austin Metro Tracks (Curated Event Domains without seniority bounds)
         {"what": "Event Operations", "where": "Austin, TX", "dist": "25"},
         {"what": "Experiential Production", "where": "Austin, TX", "dist": "25"},
         {"what": "Live Operations", "where": "Austin, TX", "dist": "25"},
         {"what": "Brand Activation", "where": "Austin, TX", "dist": "25"},
-
-        # National Remote Tracks
         {"what": "Event Operations Remote", "where": None, "dist": None},
         {"what": "Experiential Production Remote", "where": None, "dist": None},
         {"what": "Creative Operations Remote", "where": None, "dist": None}
@@ -469,7 +429,6 @@ def fetch_adzuna_jobs() -> list:
                 if res.status_code == 200:
                     results = res.json().get("results", [])
                     print(f"[Adzuna: '{q['what']}' (p.{page})] Harvested {len(results)} listings.")
-
                     if not results:
                         break
 
@@ -501,7 +460,6 @@ def fetch_adzuna_jobs() -> list:
                             "source": f"Adzuna Aggregator ({company})"
                         })
                 else:
-                    print(f"[Adzuna] HTTP {res.status_code} on '{q['what']}' p.{page}: {res.text[:100]}")
                     break
             except Exception as e:
                 print(f"[Adzuna] Error on '{q['what']}' p.{page}: {e}")
@@ -510,31 +468,112 @@ def fetch_adzuna_jobs() -> list:
     return jobs
 
 
-def fetch_remotive_jobs() -> list:
-    """Harvests unblocked full-text remote listings from Remotive API."""
-    url = "https://remotive.com/api/remote-jobs?category=all-others"
+def fetch_himalayas_jobs() -> list:
+    """Harvests open remote postings with 100% full unedited text via Himalayas API."""
+    url = "https://himalayas.app/jobs/api?limit=50"
     jobs = []
+    headers = {"User-Agent": "MissionControlJobSweep/2.0"}
     try:
-        res = requests.get(url, timeout=12)
+        res = requests.get(url, headers=headers, timeout=12)
         if res.status_code == 200:
             job_list = res.json().get("jobs", [])
             for item in job_list:
                 title = item.get("title", "")
-                # Quick pre-filter: ensure title aligns with event or operations scope
-                if any(dom in title.lower() for dom in ["event", "production", "operations", "experiential"]):
-                    jobs.append({
-                        "title": title,
-                        "company": item.get("company_name", "Remote Employer"),
-                        "url": clean_url(item.get("url", "")),
-                        "description": clean_html_description(item.get("description", "")),
-                        "workplace_type": "Remote",
-                        "location": item.get("candidate_required_location", "US Remote"),
-                        "salary": item.get("salary", "Unlisted") or "Unlisted",
-                        "source": "Remotive Open API"
-                    })
-            print(f"[Remotive] Harvested {len(jobs)} candidate listings with full requisition text.")
+                desc = clean_html_description(item.get("description", ""))
+                company = item.get("companyName", "Remote Employer")
+                raw_url = item.get("applicationUrl") or item.get("url") or ""
+                
+                # Check salary if present
+                sal_min = item.get("minSalary")
+                sal_max = item.get("maxSalary")
+                sal_str = f"${sal_min:,} - ${sal_max:,}" if sal_min and sal_max else "Unlisted"
+
+                jobs.append({
+                    "title": title,
+                    "company": company,
+                    "url": clean_url(raw_url),
+                    "description": desc,
+                    "workplace_type": "Remote",
+                    "location": "Remote (US)",
+                    "salary": sal_str,
+                    "source": f"Himalayas Full-Text ({company})"
+                })
+            print(f"[Himalayas API] Harvested {len(jobs)} full-text postings.")
     except Exception as e:
-        print(f"[Remotive] Fetch failed: {e}")
+        print(f"[Himalayas API] Fetch error: {e}")
+    return jobs
+
+
+def fetch_jobicy_jobs() -> list:
+    """Harvests open remote operations postings with full text via Jobicy API."""
+    url = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=operations"
+    jobs = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            job_list = res.json().get("jobs", [])
+            for item in job_list:
+                title = item.get("jobTitle", "")
+                desc = clean_html_description(item.get("jobDescription", ""))
+                company = item.get("companyName", "Remote Employer")
+                raw_url = item.get("url", "")
+                
+                sal_min = item.get("annualSalaryMin")
+                sal_max = item.get("annualSalaryMax")
+                sal_str = f"${sal_min:,} - ${sal_max:,}" if sal_min and sal_max else "Unlisted"
+
+                jobs.append({
+                    "title": title,
+                    "company": company,
+                    "url": clean_url(raw_url),
+                    "description": desc,
+                    "workplace_type": "Remote",
+                    "location": "Remote (US)",
+                    "salary": sal_str,
+                    "source": f"Jobicy API ({company})"
+                })
+            print(f"[Jobicy API] Harvested {len(jobs)} full-text operations postings.")
+    except Exception as e:
+        print(f"[Jobicy API] Fetch error: {e}")
+    return jobs
+
+
+def fetch_wwr_rss() -> list:
+    """Harvests We Work Remotely Management & Operations RSS feed."""
+    url = "https://weworkremotely.com/categories/remote-management-and-finance-jobs.rss"
+    jobs = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall(".//item")
+            for item in items:
+                raw_title = item.findtext("title", "")
+                link = item.findtext("link", "")
+                desc = clean_html_description(item.findtext("description", ""))
+
+                title = raw_title
+                company = "Remote Enterprise"
+                if ":" in raw_title:
+                    parts = raw_title.split(":", 1)
+                    company = parts[0].strip()
+                    title = parts[1].strip()
+
+                jobs.append({
+                    "title": title,
+                    "company": company,
+                    "url": clean_url(link),
+                    "description": desc,
+                    "workplace_type": "Remote",
+                    "location": "Remote (US)",
+                    "salary": "Unlisted",
+                    "source": f"WeWorkRemotely RSS ({company})"
+                })
+            print(f"[We Work Remotely RSS] Harvested {len(jobs)} full-text listings.")
+    except Exception as e:
+        print(f"[WeWorkRemotely RSS] Fetch error: {e}")
     return jobs
 
 
@@ -608,13 +647,15 @@ def main():
     print("Executing discovery sweep across broad-market boards, open feeds & direct ATS...")
     raw_candidates = []
 
-    # 1. Harvest Multi-Page Adzuna Queries (Pages 1-3)
+    # 1. Broad Aggregator (Adzuna)
     raw_candidates.extend(fetch_adzuna_jobs())
 
-    # 2. Harvest Open Full-Text Feeds (Remotive)
-    raw_candidates.extend(fetch_remotive_jobs())
+    # 2. Open Full-Text APIs & Feeds
+    raw_candidates.extend(fetch_himalayas_jobs())
+    raw_candidates.extend(fetch_jobicy_jobs())
+    raw_candidates.extend(fetch_wwr_rss())
 
-    # 3. Harvest Direct Verified ATS Feeds
+    # 3. Direct Verified ATS Feeds
     for feed in DISCOVERY_FEEDS:
         f_type = feed["type"]
         if f_type == "greenhouse":
