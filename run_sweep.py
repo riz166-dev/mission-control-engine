@@ -269,3 +269,19 @@ def parse_salary(salary_str: str) -> tuple[int, int]:
 def scrub_description_for_salary(text: str) -> str:
     """Scans full description text for compensation patterns ($XX/hr or $XXX,XXX/yr)."""
     if not text:
+        return "Unlisted"
+
+    # Match hourly: $50/hr - $60/hr
+    hourly_pat = r"\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:-|to)\s*\$([0-9]{2,3}(?:\.[0-9]{2})?)\s*(?:/hr|hr|per hour)"
+    h_match = re.search(hourly_pat, text, re.IGNORECASE)
+    if h_match:
+        h_min = float(h_match.group(1))
+        h_max = float(h_match.group(2))
+        return f"${h_min:.0f}/hr -${h_max:.0f}/hr (Est. ${int(h_min*2080):,} -${int(h_max*2080):,}/yr)"
+
+    # Match annual: $120,000 - $150,000
+    annual_pat = r"\$([0-9]{2,3}(?:,[0-9]{3})+)(?:\s*(?:-|to)\s*\$([0-9]{2,3}(?:,[0-9]{3})+))?"
+    a_match = re.search(annual_pat, text)
+    if a_match:
+        if a_match.group(2):
+            return f"${a_match.group(1)} -${a_match
